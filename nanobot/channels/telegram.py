@@ -92,6 +92,9 @@ class TelegramChannel(BaseChannel):
         BotCommand("start", "Start the bot"),
         BotCommand("new", "Start a new conversation"),
         BotCommand("help", "Show available commands"),
+        BotCommand("skills", "List available skills"),
+        BotCommand("skill", "Configure active skills for this chat/topic"),
+        BotCommand("model", "Configure model override for this chat/topic"),
     ]
     
     def __init__(
@@ -127,6 +130,9 @@ class TelegramChannel(BaseChannel):
         self._app.add_handler(CommandHandler("start", self._on_start))
         self._app.add_handler(CommandHandler("new", self._forward_command))
         self._app.add_handler(CommandHandler("help", self._forward_command))
+        self._app.add_handler(CommandHandler("skills", self._forward_command))
+        self._app.add_handler(CommandHandler("skill", self._forward_command))
+        self._app.add_handler(CommandHandler("model", self._forward_command))
         
         # Add message handler for text, photos, voice, documents
         self._app.add_handler(
@@ -192,10 +198,13 @@ class TelegramChannel(BaseChannel):
             chat_id = int(msg.chat_id)
             # Convert markdown to Telegram HTML
             html_content = _markdown_to_telegram_html(msg.content)
+            telegram_meta = (msg.metadata or {}).get("telegram", {})
+            thread_id = telegram_meta.get("message_thread_id")
             await self._app.bot.send_message(
                 chat_id=chat_id,
                 text=html_content,
-                parse_mode="HTML"
+                parse_mode="HTML",
+                message_thread_id=thread_id,
             )
         except ValueError:
             logger.error(f"Invalid chat_id: {msg.chat_id}")
@@ -203,9 +212,12 @@ class TelegramChannel(BaseChannel):
             # Fallback to plain text if HTML parsing fails
             logger.warning(f"HTML parse failed, falling back to plain text: {e}")
             try:
+                telegram_meta = (msg.metadata or {}).get("telegram", {})
+                thread_id = telegram_meta.get("message_thread_id")
                 await self._app.bot.send_message(
                     chat_id=int(msg.chat_id),
-                    text=msg.content
+                    text=msg.content,
+                    message_thread_id=thread_id,
                 )
             except Exception as e2:
                 logger.error(f"Error sending Telegram message: {e2}")
@@ -226,10 +238,18 @@ class TelegramChannel(BaseChannel):
         """Forward slash commands to the bus for unified handling in AgentLoop."""
         if not update.message or not update.effective_user:
             return
+        thread_id = update.message.message_thread_id
+        session_key = f"{self.name}:{update.message.chat_id}:{thread_id}" if thread_id else None
         await self._handle_message(
             sender_id=str(update.effective_user.id),
             chat_id=str(update.message.chat_id),
             content=update.message.text,
+            metadata={
+                "telegram": {
+                    "message_thread_id": thread_id,
+                },
+                "session_key": session_key,
+            },
         )
     
     async def _on_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -330,7 +350,11 @@ class TelegramChannel(BaseChannel):
                 "user_id": user.id,
                 "username": user.username,
                 "first_name": user.first_name,
-                "is_group": message.chat.type != "private"
+                "is_group": message.chat.type != "private",
+                "telegram": {
+                    "message_thread_id": message.message_thread_id,
+                },
+                "session_key": f"{self.name}:{str_chat_id}:{message.message_thread_id}" if message.message_thread_id else None,
             }
         )
     

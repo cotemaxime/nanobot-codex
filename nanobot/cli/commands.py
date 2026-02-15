@@ -189,8 +189,9 @@ def onboard():
     
     console.print(f"\n{__logo__} nanobot is ready!")
     console.print("\nNext steps:")
-    console.print("  1. Add your API key to [cyan]~/.nanobot/config.json[/cyan]")
-    console.print("     Get one at: https://openrouter.ai/keys")
+    console.print("  1. Choose provider mode in [cyan]~/.nanobot/config.json[/cyan]")
+    console.print("     - API providers: set providers.<name>.apiKey")
+    console.print("     - Codex subscription: set providers.codex.enabled=true and authenticate with Codex first")
     console.print("  2. Chat: [cyan]nanobot agent -m \"Hello!\"[/cyan]")
     console.print("\n[dim]Want Telegram/WhatsApp? See: https://github.com/HKUDS/nanobot#-chat-apps[/dim]")
 
@@ -279,21 +280,14 @@ This file stores important information that should persist across sessions.
 
 
 def _make_provider(config):
-    """Create LiteLLMProvider from config. Exits if no API key found."""
-    from nanobot.providers.litellm_provider import LiteLLMProvider
-    p = config.get_provider()
-    model = config.agents.defaults.model
-    if not (p and p.api_key) and not model.startswith("bedrock/"):
-        console.print("[red]Error: No API key configured.[/red]")
-        console.print("Set one in ~/.nanobot/config.json under providers section")
+    """Create configured LLM provider from config."""
+    from nanobot.providers.factory import create_provider
+
+    try:
+        return create_provider(config)
+    except RuntimeError as e:
+        console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(1)
-    return LiteLLMProvider(
-        api_key=p.api_key if p else None,
-        api_base=config.get_api_base(),
-        default_model=model,
-        extra_headers=p.extra_headers if p else None,
-        provider_name=config.get_provider_name(),
-    )
 
 
 # ============================================================================
@@ -854,9 +848,19 @@ def status():
     console.print(f"Workspace: {workspace} {'[green]✓[/green]' if workspace.exists() else '[red]✗[/red]'}")
 
     if config_path.exists():
+        from nanobot.providers.codex_transport import CodexTransport
         from nanobot.providers.registry import PROVIDERS
 
         console.print(f"Model: {config.agents.defaults.model}")
+        codex_cfg = config.providers.codex
+        codex_enabled = bool(codex_cfg.enabled or config.agents.defaults.model.lower().startswith("codex/"))
+        session_ok, detail = CodexTransport.probe_session(codex_cfg.profile)
+        codex_state = "[green]available[/green]" if session_ok else "[yellow]unavailable[/yellow]"
+        if codex_enabled:
+            console.print(f"Codex: [green]enabled[/green] ({codex_state})")
+        else:
+            console.print(f"Codex: [dim]disabled[/dim] ({codex_state})")
+        console.print(f"  [dim]{detail}[/dim]")
         
         # Check API keys from registry
         for spec in PROVIDERS:

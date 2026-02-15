@@ -98,8 +98,9 @@ pip install nanobot-ai
 ## 🚀 Quick Start
 
 > [!TIP]
-> Set your API key in `~/.nanobot/config.json`.
-> Get API keys: [OpenRouter](https://openrouter.ai/keys) (Global) · [Brave Search](https://brave.com/search/api/) (optional, for web search)
+> Choose one mode in `~/.nanobot/config.json`:
+> - API-key mode (OpenRouter/OpenAI/etc.)
+> - Codex subscription mode (`providers.codex.enabled=true`, then authenticate with Codex locally)
 
 **1. Initialize**
 
@@ -128,6 +129,22 @@ Add or merge these **two parts** into your config (other options have defaults).
   "agents": {
     "defaults": {
       "model": "anthropic/claude-opus-4-5"
+    }
+  }
+}
+```
+
+For Codex subscription mode:
+```json
+{
+  "providers": {
+    "codex": {
+      "enabled": true
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": "codex/default"
     }
   }
 }
@@ -569,6 +586,7 @@ Config file: `~/.nanobot/config.json`
 > - **Groq** provides free voice transcription via Whisper. If configured, Telegram voice messages will be automatically transcribed.
 > - **Zhipu Coding Plan**: If you're on Zhipu's coding plan, set `"apiBase": "https://open.bigmodel.cn/api/coding/paas/v4"` in your zhipu provider config.
 > - **MiniMax (Mainland China)**: If your API key is from MiniMax's mainland China platform (minimaxi.com), set `"apiBase": "https://api.minimaxi.com/v1"` in your minimax provider config.
+> - **Codex subscription mode**: Set `"providers": {"codex": {"enabled": true}}` and authenticate with Codex locally first. No OpenAI API key is required in this mode.
 
 | Provider | Purpose | Get API Key |
 |----------|---------|-------------|
@@ -585,6 +603,7 @@ Config file: `~/.nanobot/config.json`
 | `moonshot` | LLM (Moonshot/Kimi) | [platform.moonshot.cn](https://platform.moonshot.cn) |
 | `zhipu` | LLM (Zhipu GLM) | [open.bigmodel.cn](https://open.bigmodel.cn) |
 | `vllm` | LLM (local, any OpenAI-compatible server) | — |
+| `codex` | LLM (Codex SDK + local subscription auth) | Local Codex login |
 
 <details>
 <summary><b>Custom Provider (Any OpenAI-compatible API)</b></summary>

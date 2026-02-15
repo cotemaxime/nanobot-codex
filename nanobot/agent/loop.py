@@ -146,7 +146,11 @@ class AgentLoop:
             if isinstance(cron_tool, CronTool):
                 cron_tool.set_context(channel, chat_id)
 
-    async def _run_agent_loop(self, initial_messages: list[dict]) -> tuple[str | None, list[str]]:
+    async def _run_agent_loop(
+        self,
+        initial_messages: list[dict],
+        model: str | None = None,
+    ) -> tuple[str | None, list[str]]:
         """
         Run the agent iteration loop.
 
@@ -167,7 +171,7 @@ class AgentLoop:
             response = await self.provider.chat(
                 messages=messages,
                 tools=self.tools.get_definitions(),
-                model=self.model,
+                model=model or self.model,
                 temperature=self.temperature,
                 max_tokens=self.max_tokens,
             )
@@ -262,11 +266,15 @@ class AgentLoop:
         preview = msg.content[:80] + "..." if len(msg.content) > 80 else msg.content
         logger.info(f"Processing message from {msg.channel}:{msg.sender_id}: {preview}")
         
-        key = session_key or msg.session_key
+        metadata_session_key = None
+        if isinstance(msg.metadata, dict):
+            metadata_session_key = msg.metadata.get("session_key")
+        key = session_key or metadata_session_key or msg.session_key
         session = self.sessions.get_or_create(key)
         
         # Handle slash commands
-        cmd = msg.content.strip().lower()
+        raw_cmd = msg.content.strip()
+        cmd = raw_cmd.lower()
         if cmd == "/new":
             # Capture messages before clearing (avoid race condition with background task)
             messages_to_archive = session.messages.copy()
@@ -284,20 +292,186 @@ class AgentLoop:
                                   content="New session started. Memory consolidation in progress.")
         if cmd == "/help":
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
-                                  content="🐈 nanobot commands:\n/new — Start a new conversation\n/help — Show available commands")
+                                  content=(
+                                      "🐈 nanobot commands:\n"
+                                      "/new — Start a new conversation\n"
+                                      "/help — Show available commands\n"
+                                      "/skills — List available skills\n"
+                                      "/skill — Configure active skills for this chat/topic\n"
+                                      "/model — Configure model override for this chat/topic"
+                                  ))
+        if cmd == "/skills":
+            available = sorted([s["name"] for s in self.context.skills.list_skills()])
+            if not available:
+                return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content="No skills are available.")
+            listing = "\n".join(f"{i}. {name}" for i, name in enumerate(available, 1))
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content="Please choose a skill:\n" + listing,
+            )
+        if cmd == "/skill":
+            available = sorted([s["name"] for s in self.context.skills.list_skills()])
+            session.metadata["pending_action"] = "set_skills"
+            session.metadata["pending_skill_choices"] = available
+            self.sessions.save(session)
+            active = session.metadata.get("active_skills", [])
+            active_line = ", ".join(active) if active else "(none)"
+            listing = "\n".join(f"{i}. {name}" for i, name in enumerate(available, 1))
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=(
+                    f"Current active skills: {active_line}\n"
+                    "Please choose skills by number (comma-separated for multiple):\n"
+                    f"{listing}\n"
+                    "You can also send skill names separated by commas.\n"
+                    "Send `0` or `cancel` to cancel.\n"
+                    "Send `clear` to disable skills in this chat/topic.\n"
+                    "Send `list` to see available skills."
+                ),
+            )
+        if cmd == "/model":
+            model_choices = [
+                "gpt-5.3-codex",
+                "gpt-5.2-codex",
+                "gpt-5-codex-mini",
+            ]
+            current_model = session.metadata.get("model_override") or self.model
+            if current_model not in model_choices:
+                model_choices.insert(0, current_model)
+            session.metadata["pending_action"] = "set_model"
+            session.metadata["pending_model_choices"] = model_choices
+            self.sessions.save(session)
+            listing = "\n".join(f"{i}. {name}" for i, name in enumerate(model_choices, 1))
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=(
+                    f"Current model for this chat/topic: {current_model}\n"
+                    "Please choose a model:\n"
+                    f"{listing}\n"
+                    "Send a number or a model id.\n"
+                    "Send `0` or `cancel` to cancel.\n"
+                    "Send `clear` to use global default again.\n"
+                    "Send `show` to view current model."
+                ),
+            )
+
+        pending_action = session.metadata.get("pending_action")
+        if pending_action == "set_skills":
+            available_list = session.metadata.get("pending_skill_choices") or sorted(
+                [s["name"] for s in self.context.skills.list_skills()]
+            )
+            available = set(available_list)
+            text = raw_cmd.strip()
+            if text.lower() in {"0", "cancel"}:
+                session.metadata.pop("pending_action", None)
+                session.metadata.pop("pending_skill_choices", None)
+                self.sessions.save(session)
+                return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content="Skill update canceled.")
+            if text.lower() == "list":
+                listing = "\n".join(f"{i}. {name}" for i, name in enumerate(available_list, 1))
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content="Please choose skills:\n" + listing,
+                )
+            if text.lower() in {"clear", "none"}:
+                session.metadata.pop("active_skills", None)
+                session.metadata.pop("pending_action", None)
+                session.metadata.pop("pending_skill_choices", None)
+                self.sessions.save(session)
+                return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content="Active skills cleared.")
+
+            requested: list[str] = []
+            for part in [s.strip() for s in text.split(",") if s.strip()]:
+                if part.isdigit():
+                    idx = int(part)
+                    if 1 <= idx <= len(available_list):
+                        requested.append(available_list[idx - 1])
+                    else:
+                        requested.append(part)
+                else:
+                    requested.append(part)
+
+            deduped: list[str] = []
+            for name in requested:
+                if name not in deduped:
+                    deduped.append(name)
+
+            requested = deduped
+            invalid = [s for s in requested if s not in available]
+            if invalid:
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=(
+                        f"Unknown skills: {', '.join(invalid)}.\n"
+                        "Send `list` to view numbered skills, then reply with numbers like `1,3`."
+                    ),
+                )
+            session.metadata["active_skills"] = requested
+            session.metadata.pop("pending_action", None)
+            session.metadata.pop("pending_skill_choices", None)
+            self.sessions.save(session)
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=f"Active skills set: {', '.join(requested) if requested else '(none)'}",
+            )
+
+        if pending_action == "set_model":
+            text = raw_cmd.strip()
+            model_choices = session.metadata.get("pending_model_choices") or []
+            if text.lower() in {"0", "cancel"}:
+                session.metadata.pop("pending_action", None)
+                session.metadata.pop("pending_model_choices", None)
+                self.sessions.save(session)
+                return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content="Model update canceled.")
+            if text.lower() == "show":
+                current = session.metadata.get("model_override") or self.model
+                return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=f"Current model: {current}")
+            if text.lower() in {"clear", "default"}:
+                session.metadata.pop("model_override", None)
+                session.metadata.pop("pending_action", None)
+                session.metadata.pop("pending_model_choices", None)
+                self.sessions.save(session)
+                return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=f"Model reset to default: {self.model}")
+
+            selected = text
+            if text.isdigit() and model_choices:
+                idx = int(text)
+                if 1 <= idx <= len(model_choices):
+                    selected = model_choices[idx - 1]
+                else:
+                    return OutboundMessage(
+                        channel=msg.channel,
+                        chat_id=msg.chat_id,
+                        content=f"Invalid model number: {text}. Please choose 1-{len(model_choices)}.",
+                    )
+
+            session.metadata["model_override"] = selected
+            session.metadata.pop("pending_action", None)
+            session.metadata.pop("pending_model_choices", None)
+            self.sessions.save(session)
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=f"Model override set to: {selected}")
         
         if len(session.messages) > self.memory_window:
             asyncio.create_task(self._consolidate_memory(session))
 
         self._set_tool_context(msg.channel, msg.chat_id)
+        active_skills = session.metadata.get("active_skills")
+        model_for_session = session.metadata.get("model_override") or self.model
         initial_messages = self.context.build_messages(
             history=session.get_history(max_messages=self.memory_window),
             current_message=msg.content,
+            skill_names=active_skills if isinstance(active_skills, list) else None,
             media=msg.media if msg.media else None,
             channel=msg.channel,
             chat_id=msg.chat_id,
         )
-        final_content, tools_used = await self._run_agent_loop(initial_messages)
+        final_content, tools_used = await self._run_agent_loop(initial_messages, model=model_for_session)
 
         if final_content is None:
             final_content = "I've completed processing but have no response to give."

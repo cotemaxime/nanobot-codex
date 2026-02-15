@@ -177,8 +177,21 @@ class ProviderConfig(BaseModel):
     extra_headers: dict[str, str] | None = None  # Custom headers (e.g. APP-Code for AiHubMix)
 
 
+class CodexProviderConfig(BaseModel):
+    """Codex SDK provider configuration (subscription auth via local session)."""
+
+    enabled: bool = False
+    profile: str | None = None
+    timeout_seconds: int = 180
+    max_internal_native_steps: int = 6
+    strict_auth: bool = True
+    skip_git_repo_check: bool = True
+    native_tools: list[str] = Field(default_factory=lambda: ["exec", "web_search", "web_fetch"])
+
+
 class ProvidersConfig(BaseModel):
     """Configuration for LLM providers."""
+    codex: CodexProviderConfig = Field(default_factory=CodexProviderConfig)
     custom: ProviderConfig = Field(default_factory=ProviderConfig)  # Any OpenAI-compatible endpoint
     anthropic: ProviderConfig = Field(default_factory=ProviderConfig)
     openai: ProviderConfig = Field(default_factory=ProviderConfig)
