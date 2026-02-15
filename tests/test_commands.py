@@ -3,9 +3,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from click.exceptions import Exit
 from typer.testing import CliRunner
 
-from nanobot.cli.commands import app
+from nanobot.cli.commands import app, _make_provider
+from nanobot.config.schema import Config
 
 runner = CliRunner()
 
@@ -90,3 +92,41 @@ def test_onboard_existing_workspace_safe_create(mock_paths):
     assert "Created workspace" not in result.stdout
     assert "Created AGENTS.md" in result.stdout
     assert (workspace_dir / "AGENTS.md").exists()
+
+
+def test_status_shows_codex_session_state(monkeypatch, tmp_path):
+    cfg = Config()
+    cfg.providers.codex.enabled = True
+    cfg.providers.codex.profile = "default"
+    cfg.agents.defaults.model = "codex/default"
+
+    fake_config_path = tmp_path / "config.json"
+    fake_config_path.write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr("nanobot.config.loader.get_config_path", lambda: fake_config_path)
+    monkeypatch.setattr("nanobot.config.loader.load_config", lambda: cfg)
+    monkeypatch.setattr(
+        "nanobot.providers.codex_transport.CodexTransport.probe_session",
+        lambda profile=None: (False, "No Codex session detected"),
+    )
+
+    result = runner.invoke(app, ["status"])
+
+    assert result.exit_code == 0
+    assert "Codex: enabled" in result.stdout
+    assert "No Codex session detected" in result.stdout
+
+
+def test_make_provider_surfaces_codex_auth_error(monkeypatch):
+    cfg = Config()
+    cfg.providers.codex.enabled = True
+
+    monkeypatch.setattr(
+        "nanobot.providers.factory.create_provider",
+        lambda config: (_ for _ in ()).throw(RuntimeError("Codex session is unavailable")),
+    )
+
+    with pytest.raises(Exit) as exc:
+        _make_provider(cfg)
+
+    assert exc.value.exit_code == 1

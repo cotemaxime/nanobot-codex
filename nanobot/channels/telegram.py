@@ -112,6 +112,9 @@ class TelegramChannel(BaseChannel):
         BotCommand("start", "Start the bot"),
         BotCommand("new", "Start a new conversation"),
         BotCommand("help", "Show available commands"),
+        BotCommand("skills", "List available skills"),
+        BotCommand("skill", "Configure active skills for this chat/topic"),
+        BotCommand("model", "Configure model override for this chat/topic"),
     ]
     
     def __init__(
@@ -147,6 +150,9 @@ class TelegramChannel(BaseChannel):
         self._app.add_handler(CommandHandler("start", self._on_start))
         self._app.add_handler(CommandHandler("new", self._forward_command))
         self._app.add_handler(CommandHandler("help", self._forward_command))
+        self._app.add_handler(CommandHandler("skills", self._forward_command))
+        self._app.add_handler(CommandHandler("skill", self._forward_command))
+        self._app.add_handler(CommandHandler("model", self._forward_command))
         
         # Add message handler for text, photos, voice, documents
         self._app.add_handler(
@@ -220,6 +226,8 @@ class TelegramChannel(BaseChannel):
 
         try:
             chat_id = int(msg.chat_id)
+            telegram_meta = (msg.metadata or {}).get("telegram", {})
+            thread_id = telegram_meta.get("message_thread_id")
         except ValueError:
             logger.error(f"Invalid chat_id: {msg.chat_id}")
             return
@@ -235,22 +243,35 @@ class TelegramChannel(BaseChannel):
                 }.get(media_type, self._app.bot.send_document)
                 param = "photo" if media_type == "photo" else media_type if media_type in ("voice", "audio") else "document"
                 with open(media_path, 'rb') as f:
-                    await sender(chat_id=chat_id, **{param: f})
+                    await sender(chat_id=chat_id, message_thread_id=thread_id, **{param: f})
             except Exception as e:
                 filename = media_path.rsplit("/", 1)[-1]
                 logger.error(f"Failed to send media {media_path}: {e}")
-                await self._app.bot.send_message(chat_id=chat_id, text=f"[Failed to send: {filename}]")
+                await self._app.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"[Failed to send: {filename}]",
+                    message_thread_id=thread_id,
+                )
 
         # Send text content
         if msg.content and msg.content != "[empty message]":
             for chunk in _split_message(msg.content):
                 try:
                     html = _markdown_to_telegram_html(chunk)
-                    await self._app.bot.send_message(chat_id=chat_id, text=html, parse_mode="HTML")
+                    await self._app.bot.send_message(
+                        chat_id=chat_id,
+                        text=html,
+                        parse_mode="HTML",
+                        message_thread_id=thread_id,
+                    )
                 except Exception as e:
                     logger.warning(f"HTML parse failed, falling back to plain text: {e}")
                     try:
-                        await self._app.bot.send_message(chat_id=chat_id, text=chunk)
+                        await self._app.bot.send_message(
+                            chat_id=chat_id,
+                            text=chunk,
+                            message_thread_id=thread_id,
+                        )
                     except Exception as e2:
                         logger.error(f"Error sending Telegram message: {e2}")
     
@@ -276,10 +297,18 @@ class TelegramChannel(BaseChannel):
         """Forward slash commands to the bus for unified handling in AgentLoop."""
         if not update.message or not update.effective_user:
             return
+        thread_id = update.message.message_thread_id
+        session_key = f"{self.name}:{update.message.chat_id}:{thread_id}" if thread_id else None
         await self._handle_message(
             sender_id=self._sender_id(update.effective_user),
             chat_id=str(update.message.chat_id),
             content=update.message.text,
+            metadata={
+                "telegram": {
+                    "message_thread_id": thread_id,
+                },
+                "session_key": session_key,
+            },
         )
     
     async def _on_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -376,7 +405,11 @@ class TelegramChannel(BaseChannel):
                 "user_id": user.id,
                 "username": user.username,
                 "first_name": user.first_name,
-                "is_group": message.chat.type != "private"
+                "is_group": message.chat.type != "private",
+                "telegram": {
+                    "message_thread_id": message.message_thread_id,
+                },
+                "session_key": f"{self.name}:{str_chat_id}:{message.message_thread_id}" if message.message_thread_id else None,
             }
         )
     
