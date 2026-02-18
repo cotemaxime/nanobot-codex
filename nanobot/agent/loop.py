@@ -535,7 +535,6 @@ class AgentLoop:
                 f"Current active skills: {active_line}\n"
                 "Please choose skills by number (comma-separated for multiple):\n"
                 f"{listing}\n"
-                "You can also send skill names separated by commas.\n"
                 "Send `0` or `cancel` to cancel.\n"
                 "Send `clear` to disable skills in this chat/topic.\n"
                 "Send `list` to see available skills."
@@ -553,7 +552,7 @@ class AgentLoop:
                 f"Current model for this chat/topic: {current_model}\n"
                 "Please choose a model:\n"
                 f"{listing}\n"
-                "Send a number or a model id.\n"
+                "Send a number only.\n"
                 "Send `0` or `cancel` to cancel.\n"
                 "Send `clear` to use global default again.\n"
                 "Send `show` to view current model."
@@ -564,7 +563,6 @@ class AgentLoop:
             available_list = session.metadata.get("pending_skill_choices") or sorted(
                 [s["name"] for s in self.context.skills.list_skills()]
             )
-            available = set(available_list)
             text = raw_cmd.strip()
             if text.lower() in {"0", "cancel"}:
                 session.metadata.pop("pending_action", None)
@@ -583,14 +581,17 @@ class AgentLoop:
 
             requested: list[str] = []
             for part in [s.strip() for s in text.split(",") if s.strip()]:
-                if part.isdigit():
-                    idx = int(part)
-                    if 1 <= idx <= len(available_list):
-                        requested.append(available_list[idx - 1])
-                    else:
-                        requested.append(part)
+                if not part.isdigit():
+                    return _reply(
+                        "Invalid selection. Send skill numbers only (for example: `1` or `1,3`)."
+                    )
+                idx = int(part)
+                if 1 <= idx <= len(available_list):
+                    requested.append(available_list[idx - 1])
                 else:
-                    requested.append(part)
+                    return _reply(
+                        f"Invalid skill number: {part}. Please choose 1-{len(available_list)}."
+                    )
 
             deduped: list[str] = []
             for name in requested:
@@ -598,12 +599,6 @@ class AgentLoop:
                     deduped.append(name)
 
             requested = deduped
-            invalid = [s for s in requested if s not in available]
-            if invalid:
-                return _reply(
-                    f"Unknown skills: {', '.join(invalid)}.\n"
-                    "Send `list` to view numbered skills, then reply with numbers like `1,3`."
-                )
             session.metadata["active_skills"] = requested
             session.metadata.pop("pending_action", None)
             session.metadata.pop("pending_skill_choices", None)
@@ -628,8 +623,13 @@ class AgentLoop:
                 self.sessions.save(session)
                 return _reply(f"Model reset to default: {self.model}")
 
+            if not text.isdigit():
+                return _reply(
+                    "Invalid selection. Send a model number only (for example: `1` or `2`)."
+                )
+
             selected = text
-            if text.isdigit() and model_choices:
+            if model_choices:
                 idx = int(text)
                 if 1 <= idx <= len(model_choices):
                     selected = model_choices[idx - 1]

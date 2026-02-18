@@ -94,7 +94,7 @@ async def test_model_override_is_scoped_by_topic_session_key(tmp_path):
 
     await loop.process_direct("/model", session_key=topic_a, channel="telegram", chat_id="42")
     await loop.process_direct(
-        "openai-codex/gpt-5-codex-mini",
+        "3",
         session_key=topic_a,
         channel="telegram",
         chat_id="42",
@@ -102,7 +102,7 @@ async def test_model_override_is_scoped_by_topic_session_key(tmp_path):
 
     await loop.process_direct("/model", session_key=topic_b, channel="telegram", chat_id="42")
     await loop.process_direct(
-        "openai-codex/gpt-5-codex",
+        "2",
         session_key=topic_b,
         channel="telegram",
         chat_id="42",

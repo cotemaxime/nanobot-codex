@@ -311,6 +311,57 @@ async def test_topic_command_response_preserves_telegram_thread_metadata(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_model_selection_rejects_non_numeric_input(tmp_path):
+    manager = InMemorySessionManager()
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=ScriptedProvider(),
+        workspace=tmp_path,
+        session_manager=manager,
+        model="test/default",
+    )
+
+    await loop.process_direct("/model", session_key="telegram:chat", channel="telegram", chat_id="chat")
+    result = await loop.process_direct(
+        "is it working?",
+        session_key="telegram:chat",
+        channel="telegram",
+        chat_id="chat",
+    )
+
+    assert "Invalid selection. Send a model number only" in result
+    session = manager.get_or_create("telegram:chat")
+    assert session.metadata.get("model_override") is None
+    assert session.metadata.get("pending_action") == "set_model"
+
+
+@pytest.mark.asyncio
+async def test_skill_selection_rejects_non_numeric_input(tmp_path):
+    manager = InMemorySessionManager()
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=ScriptedProvider(),
+        workspace=tmp_path,
+        session_manager=manager,
+        model="test/default",
+    )
+    loop.context.skills.list_skills = lambda: [{"name": "search"}, {"name": "git"}]  # type: ignore[method-assign]
+
+    await loop.process_direct("/skill", session_key="telegram:chat", channel="telegram", chat_id="chat")
+    result = await loop.process_direct(
+        "search",
+        session_key="telegram:chat",
+        channel="telegram",
+        chat_id="chat",
+    )
+
+    assert "Invalid selection. Send skill numbers only" in result
+    session = manager.get_or_create("telegram:chat")
+    assert session.metadata.get("active_skills") is None
+    assert session.metadata.get("pending_action") == "set_skills"
+
+
+@pytest.mark.asyncio
 async def test_agent_run_processes_sessions_concurrently(tmp_path):
     bus = MessageBus()
     loop = AgentLoop(
