@@ -12,10 +12,12 @@ class MessageTool(Tool):
     def __init__(
         self, 
         send_callback: Callable[[OutboundMessage], Awaitable[None]] | None = None,
+        context_getter: Callable[[], tuple[str, str] | None] | None = None,
         default_channel: str = "",
         default_chat_id: str = ""
     ):
         self._send_callback = send_callback
+        self._context_getter = context_getter
         self._default_channel = default_channel
         self._default_chat_id = default_chat_id
     
@@ -70,6 +72,13 @@ class MessageTool(Tool):
         media: list[str] | None = None,
         **kwargs: Any
     ) -> str:
+        if not channel or not chat_id:
+            if self._context_getter:
+                context = self._context_getter()
+                if context:
+                    context_channel, context_chat_id = context
+                    channel = channel or context_channel
+                    chat_id = chat_id or context_chat_id
         channel = channel or self._default_channel
         chat_id = chat_id or self._default_chat_id
         

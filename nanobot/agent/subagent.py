@@ -2,13 +2,14 @@
 
 import asyncio
 import json
+import time
 import uuid
 from pathlib import Path
 from typing import Any
 
 from loguru import logger
 
-from nanobot.bus.events import InboundMessage
+from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.providers.base import LLMProvider
 from nanobot.agent.tools.registry import ToolRegistry
@@ -78,16 +79,28 @@ class SubagentManager:
         }
         
         # Create background task
+        started_monotonic = time.monotonic()
         bg_task = asyncio.create_task(
-            self._run_subagent(task_id, task, display_label, origin)
+            self._run_subagent(task_id, task, display_label, origin, started_monotonic)
         )
         self._running_tasks[task_id] = bg_task
         
         # Cleanup when done
         bg_task.add_done_callback(lambda _: self._running_tasks.pop(task_id, None))
-        
+
         logger.info(f"Spawned subagent [{task_id}]: {display_label}")
-        return f"Subagent [{display_label}] started (id: {task_id}). I'll notify you when it completes."
+        await self.bus.publish_outbound(
+            OutboundMessage(
+                channel=origin_channel,
+                chat_id=origin_chat_id,
+                content=(
+                    f"Started background task '{display_label}' (id: {task_id}). "
+                    "I will send the final result here when it completes."
+                ),
+            )
+        )
+        # Keep a tool result for the orchestrator; user-facing notice is sent above.
+        return f"Background task queued (id: {task_id})."
     
     async def _run_subagent(
         self,
@@ -95,6 +108,7 @@ class SubagentManager:
         task: str,
         label: str,
         origin: dict[str, str],
+        started_monotonic: float,
     ) -> None:
         """Execute the subagent task and announce the result."""
         logger.info(f"Subagent [{task_id}] starting task: {label}")
@@ -176,12 +190,28 @@ class SubagentManager:
                 final_result = "Task completed but no final response was generated."
             
             logger.info(f"Subagent [{task_id}] completed successfully")
-            await self._announce_result(task_id, label, task, final_result, origin, "ok")
+            await self._announce_result(
+                task_id,
+                label,
+                task,
+                final_result,
+                origin,
+                "ok",
+                elapsed_seconds=time.monotonic() - started_monotonic,
+            )
             
         except Exception as e:
             error_msg = f"Error: {str(e)}"
             logger.error(f"Subagent [{task_id}] failed: {e}")
-            await self._announce_result(task_id, label, task, error_msg, origin, "error")
+            await self._announce_result(
+                task_id,
+                label,
+                task,
+                error_msg,
+                origin,
+                "error",
+                elapsed_seconds=time.monotonic() - started_monotonic,
+            )
     
     async def _announce_result(
         self,
@@ -191,18 +221,24 @@ class SubagentManager:
         result: str,
         origin: dict[str, str],
         status: str,
+        elapsed_seconds: float,
     ) -> None:
         """Announce the subagent result to the main agent via the message bus."""
         status_text = "completed successfully" if status == "ok" else "failed"
+        elapsed_min = max(1, int(round(elapsed_seconds / 60.0)))
         
         announce_content = f"""[Subagent '{label}' {status_text}]
 
 Task: {task}
+Elapsed: about {elapsed_min} minute(s)
 
 Result:
 {result}
 
-Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not mention technical details like "subagent" or task IDs."""
+This is a delayed background-task callback, not the user's latest request.
+Reply in exactly this format:
+Background update (earlier task '{label}', {elapsed_min} min): <one short sentence summary>
+Then add one optional next step sentence only if action is still needed."""
         
         # Inject as system message to trigger main agent
         msg = InboundMessage(
