@@ -1,6 +1,6 @@
 """Cron tool for scheduling reminders and tasks."""
 
-from typing import Any
+from typing import Any, Callable
 
 from nanobot.agent.tools.base import Tool
 from nanobot.cron.service import CronService
@@ -10,8 +10,13 @@ from nanobot.cron.types import CronSchedule
 class CronTool(Tool):
     """Tool to schedule reminders and recurring tasks."""
     
-    def __init__(self, cron_service: CronService):
+    def __init__(
+        self,
+        cron_service: CronService,
+        context_getter: Callable[[], tuple[str, str] | None] | None = None,
+    ):
         self._cron = cron_service
+        self._context_getter = context_getter
         self._channel = ""
         self._chat_id = ""
     
@@ -95,7 +100,13 @@ class CronTool(Tool):
     ) -> str:
         if not message:
             return "Error: message is required for add"
-        if not self._channel or not self._chat_id:
+        channel = self._channel
+        chat_id = self._chat_id
+        if self._context_getter:
+            context = self._context_getter()
+            if context:
+                channel, chat_id = context
+        if not channel or not chat_id:
             return "Error: no session context (channel/chat_id)"
         if tz and not cron_expr:
             return "Error: tz can only be used with cron_expr"
@@ -126,8 +137,8 @@ class CronTool(Tool):
             schedule=schedule,
             message=message,
             deliver=True,
-            channel=self._channel,
-            to=self._chat_id,
+            channel=channel,
+            to=chat_id,
             delete_after_run=delete_after,
         )
         return f"Created job '{job.name}' (id: {job.id})"

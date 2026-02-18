@@ -28,6 +28,8 @@ class ChannelManager:
         self.bus = bus
         self.channels: dict[str, BaseChannel] = {}
         self._dispatch_task: asyncio.Task | None = None
+        self._outbound_queues: dict[str, asyncio.Queue[OutboundMessage]] = {}
+        self._outbound_workers: dict[str, asyncio.Task[None]] = {}
         
         self._init_channels()
     
@@ -173,6 +175,7 @@ class ChannelManager:
                 await self._dispatch_task
             except asyncio.CancelledError:
                 pass
+        await self._stop_outbound_workers()
         
         # Stop all channels
         for name, channel in self.channels.items():
@@ -193,19 +196,69 @@ class ChannelManager:
                     timeout=1.0
                 )
                 
-                channel = self.channels.get(msg.channel)
-                if channel:
-                    try:
-                        await channel.send(msg)
-                    except Exception as e:
-                        logger.error(f"Error sending to {msg.channel}: {e}")
-                else:
+                if msg.channel not in self.channels:
                     logger.warning(f"Unknown channel: {msg.channel}")
+                    continue
+                queue = self._outbound_queues.setdefault(msg.channel, asyncio.Queue())
+                await queue.put(msg)
+                self._ensure_outbound_worker(msg.channel)
                     
             except asyncio.TimeoutError:
                 continue
             except asyncio.CancelledError:
                 break
+
+    def _ensure_outbound_worker(self, channel_name: str) -> None:
+        """Ensure per-channel outbound worker exists."""
+        worker = self._outbound_workers.get(channel_name)
+        if worker is None or worker.done():
+            queue = self._outbound_queues[channel_name]
+            self._outbound_workers[channel_name] = asyncio.create_task(
+                self._outbound_channel_worker(channel_name, queue)
+            )
+
+    async def _outbound_channel_worker(
+        self,
+        channel_name: str,
+        queue: asyncio.Queue[OutboundMessage],
+    ) -> None:
+        """Send outbound messages serially for one channel."""
+        channel = self.channels.get(channel_name)
+        if not channel:
+            return
+        try:
+            while True:
+                try:
+                    msg = await asyncio.wait_for(queue.get(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    if queue.empty():
+                        break
+                    continue
+                try:
+                    await channel.send(msg)
+                except Exception as e:
+                    logger.error(f"Error sending to {channel_name}: {e}")
+                if queue.empty():
+                    break
+        finally:
+            if self._outbound_workers.get(channel_name) is asyncio.current_task():
+                self._outbound_workers.pop(channel_name, None)
+            if queue.empty():
+                self._outbound_queues.pop(channel_name, None)
+            else:
+                self._outbound_workers[channel_name] = asyncio.create_task(
+                    self._outbound_channel_worker(channel_name, queue)
+                )
+
+    async def _stop_outbound_workers(self) -> None:
+        """Cancel outbound workers."""
+        workers = list(self._outbound_workers.values())
+        self._outbound_workers.clear()
+        self._outbound_queues.clear()
+        for worker in workers:
+            worker.cancel()
+        if workers:
+            await asyncio.gather(*workers, return_exceptions=True)
     
     def get_channel(self, name: str) -> BaseChannel | None:
         """Get a channel by name."""

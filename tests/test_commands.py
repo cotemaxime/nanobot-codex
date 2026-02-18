@@ -2,10 +2,13 @@ import shutil
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
 from typer.testing import CliRunner
 
-from nanobot.cli.commands import app
+import pytest
+from click.exceptions import Exit
+
+from nanobot.cli.commands import _make_provider, app
+from nanobot.config.schema import Config
 
 runner = CliRunner()
 
@@ -90,3 +93,34 @@ def test_onboard_existing_workspace_safe_create(mock_paths):
     assert "Created workspace" not in result.stdout
     assert "Created AGENTS.md" in result.stdout
     assert (workspace_dir / "AGENTS.md").exists()
+
+
+def test_status_shows_oauth_provider_line(monkeypatch, tmp_path):
+    cfg = Config()
+    cfg.agents.defaults.model = "openai-codex/gpt-5-codex"
+
+    fake_config_path = tmp_path / "config.json"
+    fake_config_path.write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr("nanobot.config.loader.get_config_path", lambda: fake_config_path)
+    monkeypatch.setattr("nanobot.config.loader.load_config", lambda: cfg)
+
+    result = runner.invoke(app, ["status"])
+
+    assert result.exit_code == 0
+    assert "Model: openai-codex/gpt-5-codex" in result.stdout
+    assert "OpenAI Codex: ✓ (OAuth)" in result.stdout
+
+
+def test_make_provider_surfaces_provider_creation_error(monkeypatch):
+    cfg = Config()
+    cfg.agents.defaults.model = "anthropic/claude-3-5-haiku"
+    cfg.providers.anthropic.api_key = "test-key"
+
+    monkeypatch.setattr(
+        "nanobot.providers.litellm_provider.LiteLLMProvider.__init__",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("provider init failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="provider init failed"):
+        _make_provider(cfg)

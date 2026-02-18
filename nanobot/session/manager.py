@@ -68,7 +68,13 @@ class SessionManager:
 
     def __init__(self, workspace: Path):
         self.workspace = workspace
-        self.sessions_dir = ensure_dir(self.workspace / "sessions")
+        default_dir = Path.home() / ".nanobot" / "sessions"
+        fallback_dir = self.workspace / ".nanobot" / "sessions"
+        try:
+            self.sessions_dir = ensure_dir(default_dir)
+        except OSError:
+            # Sandbox/permissions can block writes under HOME; keep sessions in workspace then.
+            self.sessions_dir = ensure_dir(fallback_dir)
         self.legacy_sessions_dir = Path.home() / ".nanobot" / "sessions"
         self._cache: dict[str, Session] = {}
     

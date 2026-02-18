@@ -1,6 +1,6 @@
 """Spawn tool for creating background subagents."""
 
-from typing import Any, TYPE_CHECKING
+from typing import Any, Callable, TYPE_CHECKING
 
 from nanobot.agent.tools.base import Tool
 
@@ -16,8 +16,13 @@ class SpawnTool(Tool):
     to the main agent when complete.
     """
     
-    def __init__(self, manager: "SubagentManager"):
+    def __init__(
+        self,
+        manager: "SubagentManager",
+        context_getter: Callable[[], tuple[str, str] | None] | None = None,
+    ):
         self._manager = manager
+        self._context_getter = context_getter
         self._origin_channel = "cli"
         self._origin_chat_id = "direct"
     
@@ -57,9 +62,15 @@ class SpawnTool(Tool):
     
     async def execute(self, task: str, label: str | None = None, **kwargs: Any) -> str:
         """Spawn a subagent to execute the given task."""
+        origin_channel = self._origin_channel
+        origin_chat_id = self._origin_chat_id
+        if self._context_getter:
+            context = self._context_getter()
+            if context:
+                origin_channel, origin_chat_id = context
         return await self._manager.spawn(
             task=task,
             label=label,
-            origin_channel=self._origin_channel,
-            origin_chat_id=self._origin_chat_id,
+            origin_channel=origin_channel,
+            origin_chat_id=origin_chat_id,
         )
