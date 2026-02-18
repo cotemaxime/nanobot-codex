@@ -414,6 +414,12 @@ async def test_telegram_reaction_thumbs_up_marks_completed(tmp_path):
         session_manager=manager,
         model="test/default",
     )
+    consolidate_calls = []
+
+    async def _fake_consolidate(s, archive_all=False, force=False):
+        consolidate_calls.append((s.key, archive_all, force))
+
+    loop._consolidate_memory = _fake_consolidate  # type: ignore[method-assign]
 
     response = await loop._process_message(InboundMessage(
         channel="telegram",
@@ -429,6 +435,9 @@ async def test_telegram_reaction_thumbs_up_marks_completed(tmp_path):
 
     assert response is not None
     assert "Marked this as completed" in response.content
+    await asyncio.sleep(0)
+    assert consolidate_calls
+    assert consolidate_calls[-1] == ("telegram:chat", False, True)
     updated = manager.get_or_create("telegram:chat")
     approvals = updated.metadata.get("approved_events")
     assert isinstance(approvals, list) and approvals

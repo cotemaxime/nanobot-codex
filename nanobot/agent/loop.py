@@ -720,6 +720,7 @@ class AgentLoop:
             text = "Acknowledged. Marked this as completed."
             session.add_message("assistant", text, reaction_control=True)
             self.sessions.save(session)
+            asyncio.create_task(self._consolidate_memory(session, force=True))
             return OutboundMessage(
                 channel=msg.channel,
                 chat_id=msg.chat_id,
@@ -851,12 +852,13 @@ class AgentLoop:
             content=final_content
         )
     
-    async def _consolidate_memory(self, session, archive_all: bool = False) -> None:
+    async def _consolidate_memory(self, session, archive_all: bool = False, force: bool = False) -> None:
         """Consolidate old messages into MEMORY.md + HISTORY.md.
 
         Args:
             archive_all: If True, clear all messages and reset session (for /new command).
                        If False, only write to files without modifying session.
+            force: If True, process all unconsolidated messages immediately.
         """
         memory = MemoryStore(self.workspace)
 
@@ -864,6 +866,19 @@ class AgentLoop:
             old_messages = session.messages
             keep_count = 0
             logger.info(f"Memory consolidation (archive_all): {len(session.messages)} total messages archived")
+        elif force:
+            keep_count = 0
+            old_messages = session.messages[session.last_consolidated:]
+            if not old_messages:
+                logger.debug(
+                    f"Session {session.key}: No new messages to force-consolidate "
+                    f"(last_consolidated={session.last_consolidated}, total={len(session.messages)})"
+                )
+                return
+            logger.info(
+                f"Memory consolidation (force): {len(session.messages)} total, "
+                f"{len(old_messages)} new to consolidate"
+            )
         else:
             keep_count = self.memory_window // 2
             if len(session.messages) <= keep_count:
@@ -930,6 +945,8 @@ Respond with ONLY valid JSON, no markdown fences."""
 
             if archive_all:
                 session.last_consolidated = 0
+            elif force:
+                session.last_consolidated = len(session.messages)
             else:
                 session.last_consolidated = len(session.messages) - keep_count
             logger.info(f"Memory consolidation done: {len(session.messages)} messages, last_consolidated={session.last_consolidated}")
