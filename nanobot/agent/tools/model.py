@@ -40,7 +40,7 @@ class SetModelTool(Tool):
                 },
                 "model": {
                     "type": "string",
-                    "description": "Target model id when action is 'set' (e.g. gpt-5.3-codex)",
+                    "description": "Target model id when action is 'set' (e.g. openai-codex/gpt-5.1-codex)",
                 },
                 "persist": {
                     "type": "boolean",
@@ -61,4 +61,3 @@ class SetModelTool(Tool):
         if hasattr(result, "__await__"):
             return await result
         return str(result)
-

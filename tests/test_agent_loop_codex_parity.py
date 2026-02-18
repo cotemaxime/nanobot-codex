@@ -5,36 +5,29 @@ import pytest
 from nanobot.agent.loop import AgentLoop
 from nanobot.bus.events import InboundMessage
 from nanobot.bus.queue import MessageBus
-from nanobot.providers.base import LLMProvider, LLMResponse
-from nanobot.providers.codex_sdk_provider import CodexSDKProvider
-from nanobot.providers.codex_transport import TransportResponse, TransportToolCall
+from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 from nanobot.session.manager import Session
 
 
-class FakeTransport:
-    def __init__(
-        self,
-        profile=None,
-        workspace=None,
-        timeout_seconds=180,
-        skip_git_repo_check=True,
-        sandbox_mode="workspace-write",
-        approval_policy="never",
-        network_access_enabled=True,
-        web_search_enabled=True,
-    ):
-        self.responses = []
+class ScriptedProvider(LLMProvider):
+    def __init__(self, default_model: str = "test/default", responses=None):
+        super().__init__()
+        self.default_model = default_model
+        self.responses = list(responses or [])
 
-    def validate_session(self):
-        return True, "ok"
+    def get_default_model(self) -> str:
+        return self.default_model
 
-    async def chat(self, messages, tools, model, max_tokens, temperature):
+    async def chat(self, messages, tools=None, model=None, max_tokens=4096, temperature=0.7):
         if self.responses:
             nxt = self.responses.pop(0)
             if callable(nxt):
-                return nxt(messages, tools, model)
+                result = nxt(messages, tools, model)
+                if asyncio.iscoroutine(result):
+                    return await result
+                return result
             return nxt
-        return TransportResponse(content="ok")
+        return LLMResponse(content="ok")
 
 
 class InMemorySessionManager:
@@ -79,48 +72,46 @@ class ReplayProvider(LLMProvider):
 
 
 @pytest.mark.asyncio
-async def test_agent_loop_standard_response_with_codex_provider(monkeypatch, tmp_path):
-    monkeypatch.setattr("nanobot.providers.codex_sdk_provider.CodexTransport", FakeTransport)
-
-    provider = CodexSDKProvider(default_model="codex/default", workspace=str(tmp_path))
-    provider.transport.responses = [TransportResponse(content="hello from codex")]
+async def test_agent_loop_standard_response(tmp_path):
+    provider = ScriptedProvider(
+        default_model="openai-codex/gpt-5.1-codex",
+        responses=[LLMResponse(content="hello from provider")],
+    )
 
     loop = AgentLoop(
         bus=MessageBus(),
         provider=provider,
         workspace=tmp_path,
         session_manager=InMemorySessionManager(),
-        model="codex/default",
+        model="openai-codex/gpt-5.1-codex",
     )
 
     response = await loop.process_direct("hi", session_key="cli:test", channel="cli", chat_id="test")
-    assert "hello from codex" in response
+    assert "hello from provider" in response
 
 
 @pytest.mark.asyncio
-async def test_agent_loop_delegated_tool_roundtrip(monkeypatch, tmp_path):
-    monkeypatch.setattr("nanobot.providers.codex_sdk_provider.CodexTransport", FakeTransport)
-
+async def test_agent_loop_delegated_tool_roundtrip(tmp_path):
     f = tmp_path / "note.txt"
     f.write_text("tool output", encoding="utf-8")
 
-    provider = CodexSDKProvider(default_model="codex/default", workspace=str(tmp_path))
-
-    provider.transport.responses = [
-        TransportResponse(
-            content="Reading file",
-            tool_calls=[TransportToolCall(id="r1", name="read_file", arguments={"path": str(f)})],
-            finish_reason="tool_calls",
-        ),
-        TransportResponse(content="done with delegated tool"),
-    ]
+    provider = ScriptedProvider(
+        responses=[
+            LLMResponse(
+                content="Reading file",
+                tool_calls=[ToolCallRequest(id="r1", name="read_file", arguments={"path": str(f)})],
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(content="done with delegated tool"),
+        ]
+    )
 
     loop = AgentLoop(
         bus=MessageBus(),
         provider=provider,
         workspace=tmp_path,
         session_manager=InMemorySessionManager(),
-        model="codex/default",
+        model="test/default",
     )
 
     response = await loop.process_direct("read the file", session_key="cli:test2", channel="cli", chat_id="test2")
@@ -128,34 +119,32 @@ async def test_agent_loop_delegated_tool_roundtrip(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_agent_loop_does_not_inject_reflection_user_turn(monkeypatch, tmp_path):
-    monkeypatch.setattr("nanobot.providers.codex_sdk_provider.CodexTransport", FakeTransport)
-
+async def test_agent_loop_does_not_inject_reflection_user_turn(tmp_path):
     f = tmp_path / "note.txt"
     f.write_text("tool output", encoding="utf-8")
-
-    provider = CodexSDKProvider(default_model="codex/default", workspace=str(tmp_path))
 
     def _second_turn(messages, _tools, _model):
         assert messages[-1]["role"] == "tool"
         assert "Reflect on the results and decide next steps." not in str(messages)
-        return TransportResponse(content="final")
+        return LLMResponse(content="final")
 
-    provider.transport.responses = [
-        TransportResponse(
-            content="Reading file",
-            tool_calls=[TransportToolCall(id="r1", name="read_file", arguments={"path": str(f)})],
-            finish_reason="tool_calls",
-        ),
-        _second_turn,
-    ]
+    provider = ScriptedProvider(
+        responses=[
+            LLMResponse(
+                content="Reading file",
+                tool_calls=[ToolCallRequest(id="r1", name="read_file", arguments={"path": str(f)})],
+                finish_reason="tool_calls",
+            ),
+            _second_turn,
+        ]
+    )
 
     loop = AgentLoop(
         bus=MessageBus(),
         provider=provider,
         workspace=tmp_path,
         session_manager=InMemorySessionManager(),
-        model="codex/default",
+        model="test/default",
     )
 
     response = await loop.process_direct("read the file", session_key="cli:test-reflect", channel="cli", chat_id="test-reflect")
@@ -163,16 +152,15 @@ async def test_agent_loop_does_not_inject_reflection_user_turn(monkeypatch, tmp_
 
 
 @pytest.mark.asyncio
-async def test_memory_consolidation_json_contract_still_works(monkeypatch, tmp_path):
-    monkeypatch.setattr("nanobot.providers.codex_sdk_provider.CodexTransport", FakeTransport)
-
-    provider = CodexSDKProvider(default_model="codex/default", workspace=str(tmp_path))
-    provider.transport.responses = [
-        TransportResponse(
-            content='{"history_entry":"[2026-02-15 10:00] Discussed codex provider.",' \
-                    '"memory_update":"Prefers Codex subscription mode."}'
-        )
-    ]
+async def test_memory_consolidation_json_contract_still_works(tmp_path):
+    provider = ScriptedProvider(
+        responses=[
+            LLMResponse(
+                content='{"history_entry":"[2026-02-15 10:00] Discussed provider setup.",' \
+                        '"memory_update":"Prefers OAuth Codex mode."}'
+            )
+        ]
+    )
 
     session = Session(key="cli:mem")
     session.add_message("user", "Please remember I prefer codex mode")
@@ -183,7 +171,7 @@ async def test_memory_consolidation_json_contract_still_works(monkeypatch, tmp_p
         provider=provider,
         workspace=tmp_path,
         session_manager=InMemorySessionManager(),
-        model="codex/default",
+        model="test/default",
     )
 
     await loop._consolidate_memory(session, archive_all=True)
@@ -193,30 +181,34 @@ async def test_memory_consolidation_json_contract_still_works(monkeypatch, tmp_p
 
     assert memory_file.exists()
     assert history_file.exists()
-    assert "Prefers Codex subscription mode." in memory_file.read_text(encoding="utf-8")
-    assert "Discussed codex provider" in history_file.read_text(encoding="utf-8")
+    assert "Prefers OAuth Codex mode." in memory_file.read_text(encoding="utf-8")
+    assert "Discussed provider setup" in history_file.read_text(encoding="utf-8")
 
 
 @pytest.mark.asyncio
-async def test_agent_can_switch_model_via_set_model_tool(monkeypatch, tmp_path):
-    monkeypatch.setattr("nanobot.providers.codex_sdk_provider.CodexTransport", FakeTransport)
-
-    provider = CodexSDKProvider(default_model="gpt-5-codex-mini", workspace=str(tmp_path))
-    provider.transport.responses = [
-        TransportResponse(
-            content="Switching model",
-            tool_calls=[
-                TransportToolCall(
-                    id="m1",
-                    name="set_model",
-                    arguments={"action": "set", "model": "gpt-5.3-codex", "persist": True},
-                )
-            ],
-            finish_reason="tool_calls",
-        ),
-        lambda _messages, _tools, model: TransportResponse(content=f"final via {model}"),
-        lambda _messages, _tools, model: TransportResponse(content=f"next turn via {model}"),
-    ]
+async def test_agent_can_switch_model_via_set_model_tool(tmp_path):
+    provider = ScriptedProvider(
+        default_model="openai-codex/gpt-5-codex-mini",
+        responses=[
+            LLMResponse(
+                content="Switching model",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="m1",
+                        name="set_model",
+                        arguments={
+                            "action": "set",
+                            "model": "openai-codex/gpt-5.1-codex",
+                            "persist": True,
+                        },
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
+            lambda _messages, _tools, model: LLMResponse(content=f"final via {model}"),
+            lambda _messages, _tools, model: LLMResponse(content=f"next turn via {model}"),
+        ],
+    )
 
     manager = InMemorySessionManager()
     loop = AgentLoop(
@@ -224,23 +216,21 @@ async def test_agent_can_switch_model_via_set_model_tool(monkeypatch, tmp_path):
         provider=provider,
         workspace=tmp_path,
         session_manager=manager,
-        model="gpt-5-codex-mini",
+        model="openai-codex/gpt-5-codex-mini",
     )
 
     first = await loop.process_direct("handle complex coding task", session_key="cli:model", channel="cli", chat_id="model")
-    assert "final via gpt-5.3-codex" in first
+    assert "final via openai-codex/gpt-5.1-codex" in first
 
     session = manager.get_or_create("cli:model")
-    assert session.metadata.get("model_override") == "gpt-5.3-codex"
+    assert session.metadata.get("model_override") == "openai-codex/gpt-5.1-codex"
 
     second = await loop.process_direct("follow-up", session_key="cli:model", channel="cli", chat_id="model")
-    assert "next turn via gpt-5.3-codex" in second
+    assert "next turn via openai-codex/gpt-5.1-codex" in second
 
 
 @pytest.mark.asyncio
-async def test_last_command_resends_previous_assistant_message(monkeypatch, tmp_path):
-    monkeypatch.setattr("nanobot.providers.codex_sdk_provider.CodexTransport", FakeTransport)
-
+async def test_last_command_resends_previous_assistant_message(tmp_path):
     manager = InMemorySessionManager()
     session = manager.get_or_create("cli:last")
     session.add_message("user", "first question")
@@ -249,13 +239,13 @@ async def test_last_command_resends_previous_assistant_message(monkeypatch, tmp_
     session.add_message("assistant", "second answer")
     manager.save(session)
 
-    provider = CodexSDKProvider(default_model="codex/default", workspace=str(tmp_path))
+    provider = ScriptedProvider()
     loop = AgentLoop(
         bus=MessageBus(),
         provider=provider,
         workspace=tmp_path,
         session_manager=manager,
-        model="codex/default",
+        model="test/default",
     )
 
     result = await loop.process_direct("/last", session_key="cli:last", channel="cli", chat_id="last")
@@ -263,16 +253,14 @@ async def test_last_command_resends_previous_assistant_message(monkeypatch, tmp_
 
 
 @pytest.mark.asyncio
-async def test_new_command_with_bot_mention_resets_without_model_call(monkeypatch, tmp_path):
-    monkeypatch.setattr("nanobot.providers.codex_sdk_provider.CodexTransport", FakeTransport)
-
+async def test_new_command_with_bot_mention_resets_without_model_call(tmp_path):
     manager = InMemorySessionManager()
     session = manager.get_or_create("telegram:chat")
     session.add_message("user", "old question")
     session.add_message("assistant", "old answer")
     manager.save(session)
 
-    provider = CodexSDKProvider(default_model="codex/default", workspace=str(tmp_path))
+    provider = ScriptedProvider()
 
     async def _should_not_call_model(*args, **kwargs):
         raise AssertionError("model should not be called for /new command")
@@ -284,7 +272,7 @@ async def test_new_command_with_bot_mention_resets_without_model_call(monkeypatc
         provider=provider,
         workspace=tmp_path,
         session_manager=manager,
-        model="codex/default",
+        model="test/default",
     )
 
     result = await loop.process_direct("/new@nanobot", session_key="telegram:chat", channel="telegram", chat_id="chat")

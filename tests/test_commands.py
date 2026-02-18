@@ -2,12 +2,11 @@ import shutil
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
-from click.exceptions import Exit
 from typer.testing import CliRunner
 
-from nanobot.cli.commands import app, _make_provider
-from nanobot.config.schema import Config
+import pytest
+
+from nanobot.cli.commands import app
 
 runner = CliRunner()
 
