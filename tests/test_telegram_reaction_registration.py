@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import pytest
+
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.telegram import TelegramChannel
 from nanobot.config.schema import TelegramConfig
@@ -72,3 +74,30 @@ def test_register_reaction_handlers_falls_back_to_type_handler(monkeypatch):
     assert len(channel._app.handlers) == 1
     assert isinstance(channel._app.handlers[0], DummyTypeHandler)
     assert channel._app.handlers[0].callback == channel._on_reaction_update_fallback
+
+
+@pytest.mark.asyncio
+async def test_reaction_metadata_uses_tracked_thread_id():
+    channel = _make_channel()
+    channel._remember_message_thread(chat_id="123", message_id=42, thread_id=99)
+    captured = {}
+
+    async def _capture(**kwargs):
+        captured.update(kwargs)
+
+    channel._handle_message = _capture  # type: ignore[method-assign]
+
+    reaction = SimpleNamespace(
+        user=SimpleNamespace(id=7, username="alice", first_name="Alice"),
+        actor_chat=None,
+        chat=SimpleNamespace(id=123),
+        old_reaction=[],
+        new_reaction=[SimpleNamespace(emoji="👍")],
+        message_id=42,
+    )
+    update = SimpleNamespace(message_reaction=reaction, effective_user=None)
+    await channel._on_reaction(update, None)
+
+    assert captured["chat_id"] == "123"
+    assert captured["metadata"]["telegram"]["message_thread_id"] == 99
+    assert captured["metadata"]["session_key"] == "telegram:123:99"
