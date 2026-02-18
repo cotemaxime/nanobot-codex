@@ -706,16 +706,6 @@ class AgentLoop:
             self._active_model_ctx.reset(model_token)
             self._active_session_ctx.reset(session_token)
 
-        async def _bus_progress(content: str) -> None:
-            await self.bus.publish_outbound(OutboundMessage(
-                channel=msg.channel, chat_id=msg.chat_id, content=content,
-                metadata=msg.metadata or {},
-            ))
-
-        final_content, tools_used = await self._run_agent_loop(
-            initial_messages, on_progress=on_progress or _bus_progress,
-        )
-
         if final_content is None:
             final_content = "I've completed processing but have no response to give."
         
