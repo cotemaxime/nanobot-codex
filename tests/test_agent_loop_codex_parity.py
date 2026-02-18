@@ -281,6 +281,36 @@ async def test_new_command_with_bot_mention_resets_without_model_call(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_topic_command_response_preserves_telegram_thread_metadata(tmp_path):
+    manager = InMemorySessionManager()
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=ScriptedProvider(),
+        workspace=tmp_path,
+        session_manager=manager,
+        model="test/default",
+    )
+
+    inbound = InboundMessage(
+        channel="telegram",
+        sender_id="1|alice",
+        chat_id="1234",
+        content="/model",
+        metadata={
+            "telegram": {"message_thread_id": 99},
+            "session_key": "telegram:1234:99",
+        },
+    )
+
+    response = await loop._process_message(inbound)
+
+    assert response is not None
+    assert response.chat_id == "1234"
+    assert response.metadata.get("telegram", {}).get("message_thread_id") == 99
+    assert "Current model for this chat/topic" in response.content
+
+
+@pytest.mark.asyncio
 async def test_agent_run_processes_sessions_concurrently(tmp_path):
     bus = MessageBus()
     loop = AgentLoop(
