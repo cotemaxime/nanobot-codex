@@ -139,12 +139,28 @@ For Codex subscription mode:
 {
   "providers": {
     "codex": {
-      "enabled": true
+      "enabled": true,
+      "sandboxMode": "workspace-write",
+      "approvalPolicy": "never",
+      "diagnosticLogging": true
     }
   },
   "agents": {
     "defaults": {
       "model": "codex/default"
+    }
+  }
+}
+```
+
+For standalone VPS "full YOLO" mode (dangerous, no sandbox):
+```json
+{
+  "providers": {
+    "codex": {
+      "enabled": true,
+      "sandboxMode": "danger-full-access",
+      "approvalPolicy": "never"
     }
   }
 }

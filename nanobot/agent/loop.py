@@ -1,6 +1,8 @@
 """Agent loop: the core processing engine."""
 
 import asyncio
+from contextvars import ContextVar, Token
+from contextlib import suppress
 from contextlib import AsyncExitStack
 import json
 import json_repair
@@ -20,6 +22,7 @@ from nanobot.agent.tools.web import WebSearchTool, WebFetchTool
 from nanobot.agent.tools.message import MessageTool
 from nanobot.agent.tools.spawn import SpawnTool
 from nanobot.agent.tools.cron import CronTool
+from nanobot.agent.tools.model import SetModelTool
 from nanobot.agent.memory import MemoryStore
 from nanobot.agent.subagent import SubagentManager
 from nanobot.session.manager import Session, SessionManager
@@ -36,6 +39,26 @@ class AgentLoop:
     4. Executes tool calls
     5. Sends responses back
     """
+
+    MODEL_CHOICES = [
+        "gpt-5.3-codex",
+        "gpt-5.2-codex",
+        "gpt-5-codex-mini",
+    ]
+    PROGRESS_PING_STEP_INTERVAL_S = 120
+    PROGRESS_PING_MAX_INTERVAL_S = 10 * 60
+    PROGRESS_PING_REPEATS_PER_STEP = 2
+    REACTION_APPROVE = {"👍", "✅", "☑️", "👌"}
+    REACTION_RETRY = {"🔁", "🔄", "⟳"}
+    REACTION_REDO = {"♻️", "↩️", "↪️"}
+
+    @staticmethod
+    def _reaction_matches(tokens: set[str], candidates: set[str]) -> bool:
+        """Match reaction tokens, allowing emoji variation/skin-tone suffixes."""
+        for token in tokens:
+            if any(token == c or token.startswith(c) for c in candidates):
+                return True
+        return False
 
     def __init__(
         self,
@@ -88,6 +111,20 @@ class AgentLoop:
         self._mcp_servers = mcp_servers or {}
         self._mcp_stack: AsyncExitStack | None = None
         self._mcp_connected = False
+        self._active_session_ctx: ContextVar[Session | None] = ContextVar(
+            "active_session",
+            default=None,
+        )
+        self._active_model_ctx: ContextVar[str | None] = ContextVar(
+            "active_model",
+            default=None,
+        )
+        self._active_route_ctx: ContextVar[tuple[str, str] | None] = ContextVar(
+            "active_route",
+            default=None,
+        )
+        self._session_queues: dict[str, asyncio.Queue[InboundMessage]] = {}
+        self._session_workers: dict[str, asyncio.Task[None]] = {}
         self._register_default_tools()
     
     def _register_default_tools(self) -> None:
@@ -111,16 +148,28 @@ class AgentLoop:
         self.tools.register(WebFetchTool())
         
         # Message tool
-        message_tool = MessageTool(send_callback=self.bus.publish_outbound)
+        message_tool = MessageTool(
+            send_callback=self.bus.publish_outbound,
+            context_getter=self._get_active_route,
+        )
         self.tools.register(message_tool)
         
         # Spawn tool (for subagents)
-        spawn_tool = SpawnTool(manager=self.subagents)
+        spawn_tool = SpawnTool(
+            manager=self.subagents,
+            context_getter=self._get_active_route,
+        )
         self.tools.register(spawn_tool)
         
         # Cron tool (for scheduling)
         if self.cron_service:
-            self.tools.register(CronTool(self.cron_service))
+            self.tools.register(CronTool(
+                self.cron_service,
+                context_getter=self._get_active_route,
+            ))
+
+        # Model routing tool (allows agent-driven per-request / per-session model switch)
+        self.tools.register(SetModelTool(set_model_callback=self._set_model_from_tool))
     
     async def _connect_mcp(self) -> None:
         """Connect to configured MCP servers (one-time, lazy)."""
@@ -146,6 +195,10 @@ class AgentLoop:
             if isinstance(cron_tool, CronTool):
                 cron_tool.set_context(channel, chat_id)
 
+    def _get_active_route(self) -> tuple[str, str] | None:
+        """Get current routing context for context-aware tools."""
+        return self._active_route_ctx.get()
+
     async def _run_agent_loop(
         self,
         initial_messages: list[dict],
@@ -167,11 +220,12 @@ class AgentLoop:
 
         while iteration < self.max_iterations:
             iteration += 1
+            current_model = self._active_model_ctx.get() or model or self.model
 
             response = await self.provider.chat(
                 messages=messages,
                 tools=self.tools.get_definitions(),
-                model=model or self.model,
+                model=current_model,
                 temperature=self.temperature,
                 max_tokens=self.max_tokens,
             )
@@ -201,12 +255,49 @@ class AgentLoop:
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
                     )
-                messages.append({"role": "user", "content": "Reflect on the results and decide next steps."})
             else:
                 final_content = response.content
                 break
 
         return final_content, tools_used
+
+    def _set_model_from_tool(self, action: str, model: str | None, persist: bool) -> str:
+        """Apply model switch requested via set_model tool."""
+        action = (action or "").strip().lower()
+        session = self._active_session_ctx.get()
+        current = self._active_model_ctx.get() or self.model
+
+        if action == "show":
+            session_model = session.metadata.get("model_override") if session else None
+            if session_model:
+                return f"Current model: {current} (session override: {session_model})"
+            return f"Current model: {current} (using default)"
+
+        if action == "clear":
+            self._active_model_ctx.set(self.model)
+            if session:
+                session.metadata.pop("model_override", None)
+                self.sessions.save(session)
+            return f"Model reset to default: {self.model}"
+
+        if action != "set":
+            return "Error: action must be one of: set, show, clear"
+
+        target = (model or "").strip()
+        if not target:
+            return "Error: model is required when action='set'"
+
+        self._active_model_ctx.set(target)
+
+        if persist and session:
+            session.metadata["model_override"] = target
+            self.sessions.save(session)
+            return (
+                f"Model switched from {current} to {target} for this request "
+                "and saved for this chat/topic."
+            )
+
+        return f"Model switched from {current} to {target} for this request."
 
     async def run(self) -> None:
         """Run the agent loop, processing messages from the bus."""
@@ -214,25 +305,97 @@ class AgentLoop:
         await self._connect_mcp()
         logger.info("Agent loop started")
 
-        while self._running:
-            try:
-                msg = await asyncio.wait_for(
-                    self.bus.consume_inbound(),
-                    timeout=1.0
-                )
+        try:
+            while self._running:
                 try:
-                    response = await self._process_message(msg)
-                    if response:
-                        await self.bus.publish_outbound(response)
-                except Exception as e:
-                    logger.error(f"Error processing message: {e}")
-                    await self.bus.publish_outbound(OutboundMessage(
-                        channel=msg.channel,
-                        chat_id=msg.chat_id,
-                        content=f"Sorry, I encountered an error: {str(e)}"
-                    ))
-            except asyncio.TimeoutError:
-                continue
+                    msg = await asyncio.wait_for(
+                        self.bus.consume_inbound(),
+                        timeout=1.0
+                    )
+                except asyncio.TimeoutError:
+                    continue
+                session_key = self._resolve_session_key(msg, None)
+                queue = self._session_queues.setdefault(session_key, asyncio.Queue())
+                await queue.put(msg)
+                self._ensure_session_worker(session_key)
+        finally:
+            await self._shutdown_session_workers()
+
+    def _ensure_session_worker(self, session_key: str) -> None:
+        """Ensure a per-session worker exists so sessions can run in parallel."""
+        worker = self._session_workers.get(session_key)
+        if worker is None or worker.done():
+            queue = self._session_queues[session_key]
+            self._session_workers[session_key] = asyncio.create_task(
+                self._session_worker(session_key, queue)
+            )
+
+    async def _session_worker(
+        self,
+        session_key: str,
+        queue: asyncio.Queue[InboundMessage],
+    ) -> None:
+        """Process one session queue serially, while other sessions run concurrently."""
+        try:
+            while self._running or not queue.empty():
+                try:
+                    msg = await asyncio.wait_for(queue.get(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    continue
+                await self._process_inbound_message(msg)
+                if queue.empty():
+                    break
+        finally:
+            if self._session_workers.get(session_key) is asyncio.current_task():
+                self._session_workers.pop(session_key, None)
+            if queue.empty():
+                self._session_queues.pop(session_key, None)
+            elif self._running:
+                self._session_workers[session_key] = asyncio.create_task(
+                    self._session_worker(session_key, queue)
+                )
+
+    async def _process_inbound_message(self, msg: InboundMessage) -> None:
+        """Process one inbound message and publish outbound responses/errors."""
+        ping_task: asyncio.Task | None = None
+        try:
+            if msg.channel != "system":
+                ping_task = asyncio.create_task(self._progress_ping_loop(msg))
+            response = await self._process_message(msg)
+            if response:
+                session_key = self._resolve_session_key(msg, None)
+                if (
+                    msg.channel != "system"
+                    and self.bus.has_pending_inbound_for_session(session_key)
+                ):
+                    response.content = (
+                        "Result for your previous message:\n\n"
+                        f"{response.content}\n\n"
+                        "I already received a newer message from you and will process it next."
+                    )
+                await self.bus.publish_outbound(response)
+        except Exception as e:
+            logger.error(f"Error processing message: {e}")
+            await self.bus.publish_outbound(OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=f"Sorry, I encountered an error: {str(e)}"
+            ))
+        finally:
+            if ping_task:
+                ping_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await ping_task
+
+    async def _shutdown_session_workers(self) -> None:
+        """Cancel and await all active session workers."""
+        workers = list(self._session_workers.values())
+        self._session_workers.clear()
+        self._session_queues.clear()
+        for worker in workers:
+            worker.cancel()
+        if workers:
+            await asyncio.gather(*workers, return_exceptions=True)
     
     async def close_mcp(self) -> None:
         """Close MCP connections."""
@@ -247,6 +410,32 @@ class AgentLoop:
         """Stop the agent loop."""
         self._running = False
         logger.info("Agent loop stopping")
+
+    async def _progress_ping_loop(self, msg: InboundMessage) -> None:
+        """Send periodic progress pings while a request is still running."""
+
+        current_interval = self.PROGRESS_PING_STEP_INTERVAL_S
+        repeats = 0
+
+        while True:
+            await asyncio.sleep(current_interval)
+            await self.bus.publish_outbound(
+                OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content="Still working on this. I will send the result when it is ready.",
+                    metadata=msg.metadata or {},
+                )
+            )
+
+            repeats += 1
+            if repeats >= self.PROGRESS_PING_REPEATS_PER_STEP:
+                repeats = 0
+                if current_interval < self.PROGRESS_PING_MAX_INTERVAL_S:
+                    current_interval = min(
+                        current_interval + self.PROGRESS_PING_STEP_INTERVAL_S,
+                        self.PROGRESS_PING_MAX_INTERVAL_S,
+                    )
     
     async def _process_message(self, msg: InboundMessage, session_key: str | None = None) -> OutboundMessage | None:
         """
@@ -265,17 +454,28 @@ class AgentLoop:
         
         preview = msg.content[:80] + "..." if len(msg.content) > 80 else msg.content
         logger.info(f"Processing message from {msg.channel}:{msg.sender_id}: {preview}")
-        
-        metadata_session_key = None
-        if isinstance(msg.metadata, dict):
-            metadata_session_key = msg.metadata.get("session_key")
-        key = session_key or metadata_session_key or msg.session_key
+
+        key = self._resolve_session_key(msg, session_key)
         session = self.sessions.get_or_create(key)
+
+        # Telegram reaction events: persist event and trigger deterministic actions.
+        event_type = ""
+        if isinstance(msg.metadata, dict):
+            raw_event_type = msg.metadata.get("event_type")
+            if isinstance(raw_event_type, str):
+                event_type = raw_event_type
+        if msg.channel == "telegram" and event_type in {
+            "telegram_message_reaction",
+            "telegram_message_reaction_count",
+        }:
+            return await self._handle_telegram_reaction_event(msg, session, key, event_type)
         
         # Handle slash commands
         raw_cmd = msg.content.strip()
         cmd = raw_cmd.lower()
-        if cmd == "/new":
+        cmd_token = cmd.split()[0] if cmd else ""
+        cmd_base = cmd_token.split("@", 1)[0] if cmd_token.startswith("/") else cmd_token
+        if cmd_base == "/new":
             # Capture messages before clearing (avoid race condition with background task)
             messages_to_archive = session.messages.copy()
             session.clear()
@@ -290,17 +490,34 @@ class AgentLoop:
             asyncio.create_task(_consolidate_and_cleanup())
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
                                   content="New session started. Memory consolidation in progress.")
-        if cmd == "/help":
+        if cmd_base == "/help":
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
                                   content=(
                                       "🐈 nanobot commands:\n"
                                       "/new — Start a new conversation\n"
                                       "/help — Show available commands\n"
+                                      "/last — Resend the last assistant response\n"
                                       "/skills — List available skills\n"
                                       "/skill — Configure active skills for this chat/topic\n"
                                       "/model — Configure model override for this chat/topic"
                                   ))
-        if cmd == "/skills":
+        if cmd_base == "/last":
+            last_assistant = next(
+                (m.get("content", "") for m in reversed(session.messages) if m.get("role") == "assistant"),
+                "",
+            )
+            if not last_assistant:
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content="No previous assistant response found for this chat yet.",
+                )
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=last_assistant,
+            )
+        if cmd_base == "/skills":
             available = sorted([s["name"] for s in self.context.skills.list_skills()])
             if not available:
                 return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content="No skills are available.")
@@ -310,7 +527,7 @@ class AgentLoop:
                 chat_id=msg.chat_id,
                 content="Please choose a skill:\n" + listing,
             )
-        if cmd == "/skill":
+        if cmd_base == "/skill":
             available = sorted([s["name"] for s in self.context.skills.list_skills()])
             session.metadata["pending_action"] = "set_skills"
             session.metadata["pending_skill_choices"] = available
@@ -331,12 +548,8 @@ class AgentLoop:
                     "Send `list` to see available skills."
                 ),
             )
-        if cmd == "/model":
-            model_choices = [
-                "gpt-5.3-codex",
-                "gpt-5.2-codex",
-                "gpt-5-codex-mini",
-            ]
+        if cmd_base == "/model":
+            model_choices = list(self.MODEL_CHOICES)
             current_model = session.metadata.get("model_override") or self.model
             if current_model not in model_choices:
                 model_choices.insert(0, current_model)
@@ -460,18 +673,25 @@ class AgentLoop:
         if len(session.messages) > self.memory_window:
             asyncio.create_task(self._consolidate_memory(session))
 
-        self._set_tool_context(msg.channel, msg.chat_id)
         active_skills = session.metadata.get("active_skills")
         model_for_session = session.metadata.get("model_override") or self.model
-        initial_messages = self.context.build_messages(
-            history=session.get_history(max_messages=self.memory_window),
-            current_message=msg.content,
-            skill_names=active_skills if isinstance(active_skills, list) else None,
-            media=msg.media if msg.media else None,
-            channel=msg.channel,
-            chat_id=msg.chat_id,
-        )
-        final_content, tools_used = await self._run_agent_loop(initial_messages, model=model_for_session)
+        session_token: Token = self._active_session_ctx.set(session)
+        model_token: Token = self._active_model_ctx.set(model_for_session)
+        route_token: Token = self._active_route_ctx.set((msg.channel, msg.chat_id))
+        try:
+            initial_messages = self.context.build_messages(
+                history=session.get_history(max_messages=self.memory_window),
+                current_message=msg.content,
+                skill_names=active_skills if isinstance(active_skills, list) else None,
+                media=msg.media if msg.media else None,
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+            )
+            final_content, tools_used = await self._run_agent_loop(initial_messages, model=model_for_session)
+        finally:
+            self._active_route_ctx.reset(route_token)
+            self._active_model_ctx.reset(model_token)
+            self._active_session_ctx.reset(session_token)
 
         if final_content is None:
             final_content = "I've completed processing but have no response to give."
@@ -490,6 +710,123 @@ class AgentLoop:
             content=final_content,
             metadata=msg.metadata or {},  # Pass through for channel-specific needs (e.g. Slack thread_ts)
         )
+
+    async def _handle_telegram_reaction_event(
+        self,
+        msg: InboundMessage,
+        session: Session,
+        session_key: str,
+        event_type: str,
+    ) -> OutboundMessage | None:
+        """Persist telegram reaction events and execute reaction-based controls."""
+        session.add_message("user", msg.content)
+
+        # Aggregate count updates are persisted only (no bot response).
+        if event_type == "telegram_message_reaction_count":
+            self.sessions.save(session)
+            return None
+
+        telegram_meta = (msg.metadata or {}).get("telegram", {}) if isinstance(msg.metadata, dict) else {}
+        reaction_new = telegram_meta.get("reaction_new")
+        if not isinstance(reaction_new, list):
+            reaction_new = []
+        reactions = {str(item) for item in reaction_new if item}
+
+        # 👍 = mark as finished/approved for follow-up parsing.
+        if self._reaction_matches(reactions, self.REACTION_APPROVE):
+            approved = session.metadata.get("approved_events")
+            if not isinstance(approved, list):
+                approved = []
+            approved.append({
+                "message_id": (msg.metadata or {}).get("message_id") if isinstance(msg.metadata, dict) else None,
+                "reaction": sorted(reactions),
+                "content": msg.content,
+                "timestamp": msg.timestamp.isoformat(),
+            })
+            # Keep metadata bounded.
+            session.metadata["approved_events"] = approved[-200:]
+            text = "Acknowledged. Marked this as completed."
+            session.add_message("assistant", text, reaction_control=True)
+            self.sessions.save(session)
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=text,
+                metadata=msg.metadata or {},
+            )
+
+        # ♻️ / ↩️ = resend last assistant response.
+        if self._reaction_matches(reactions, self.REACTION_REDO):
+            last_assistant = next(
+                (
+                    m.get("content", "")
+                    for m in reversed(session.messages[:-1])
+                    if m.get("role") == "assistant" and not m.get("reaction_control")
+                ),
+                "",
+            )
+            text = last_assistant or "No previous assistant response found to redo."
+            if last_assistant:
+                session.add_message("assistant", text)
+            else:
+                session.add_message("assistant", text, reaction_control=True)
+            self.sessions.save(session)
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=text,
+                metadata=msg.metadata or {},
+            )
+
+        # 🔁 / 🔄 = retry last actionable user request with a fresh run.
+        if self._reaction_matches(reactions, self.REACTION_RETRY):
+            last_user = ""
+            for m in reversed(session.messages[:-1]):
+                if m.get("role") != "user":
+                    continue
+                content = str(m.get("content", ""))
+                if content.startswith("[telegram_reaction"):
+                    continue
+                last_user = content
+                break
+
+            if not last_user:
+                text = "No previous user request found to retry."
+                session.add_message("assistant", text, reaction_control=True)
+                self.sessions.save(session)
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=text,
+                    metadata=msg.metadata or {},
+                )
+
+            retry_metadata = dict(msg.metadata or {})
+            retry_metadata.pop("event_type", None)
+            retry_msg = InboundMessage(
+                channel=msg.channel,
+                sender_id=msg.sender_id,
+                chat_id=msg.chat_id,
+                content=last_user,
+                metadata=retry_metadata,
+            )
+            self.sessions.save(session)
+            return await self._process_message(retry_msg, session_key=session_key)
+
+        self.sessions.save(session)
+        return None
+
+    @staticmethod
+    def _resolve_session_key(msg: InboundMessage, session_key: str | None) -> str:
+        """Resolve effective session key with explicit override support."""
+        if session_key:
+            return session_key
+        metadata_session_key = None
+        if isinstance(msg.metadata, dict):
+            metadata_session_key = msg.metadata.get("session_key")
+        if isinstance(metadata_session_key, str) and metadata_session_key:
+            return metadata_session_key
+        return msg.session_key
     
     async def _process_system_message(self, msg: InboundMessage) -> OutboundMessage | None:
         """
@@ -512,14 +849,22 @@ class AgentLoop:
         
         session_key = f"{origin_channel}:{origin_chat_id}"
         session = self.sessions.get_or_create(session_key)
-        self._set_tool_context(origin_channel, origin_chat_id)
-        initial_messages = self.context.build_messages(
-            history=session.get_history(max_messages=self.memory_window),
-            current_message=msg.content,
-            channel=origin_channel,
-            chat_id=origin_chat_id,
-        )
-        final_content, _ = await self._run_agent_loop(initial_messages)
+        model_for_session = session.metadata.get("model_override") or self.model
+        session_token: Token = self._active_session_ctx.set(session)
+        model_token: Token = self._active_model_ctx.set(model_for_session)
+        route_token: Token = self._active_route_ctx.set((origin_channel, origin_chat_id))
+        try:
+            initial_messages = self.context.build_messages(
+                history=session.get_history(max_messages=self.memory_window),
+                current_message=msg.content,
+                channel=origin_channel,
+                chat_id=origin_chat_id,
+            )
+            final_content, _ = await self._run_agent_loop(initial_messages, model=model_for_session)
+        finally:
+            self._active_route_ctx.reset(route_token)
+            self._active_model_ctx.reset(model_token)
+            self._active_session_ctx.reset(session_token)
 
         if final_content is None:
             final_content = "Background task completed."

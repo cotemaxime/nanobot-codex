@@ -5,7 +5,17 @@ from nanobot.providers.codex_transport import TransportResponse, TransportToolCa
 
 
 class FakeTransport:
-    def __init__(self, profile=None, workspace=None, timeout_seconds=180, skip_git_repo_check=True):
+    def __init__(
+        self,
+        profile=None,
+        workspace=None,
+        timeout_seconds=180,
+        skip_git_repo_check=True,
+        sandbox_mode="workspace-write",
+        approval_policy="never",
+        network_access_enabled=True,
+        web_search_enabled=True,
+    ):
         self.calls = []
         self.responses = []
 

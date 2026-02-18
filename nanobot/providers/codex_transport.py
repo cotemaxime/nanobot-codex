@@ -6,11 +6,17 @@ changes are localized here.
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import json
 import os
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
+
+from loguru import logger
 
 
 @dataclass
@@ -42,11 +48,20 @@ class CodexTransport:
         workspace: str | None = None,
         timeout_seconds: int = 180,
         skip_git_repo_check: bool = True,
+        sandbox_mode: str = "workspace-write",
+        approval_policy: str = "never",
+        network_access_enabled: bool = True,
+        web_search_enabled: bool = True,
     ):
         self.profile = profile
         self.workspace = str(Path(workspace).expanduser().resolve()) if workspace else None
         self.timeout_seconds = timeout_seconds
+        self.diagnostic_logging = False
         self.skip_git_repo_check = skip_git_repo_check
+        self.sandbox_mode = sandbox_mode
+        self.approval_policy = approval_policy
+        self.network_access_enabled = network_access_enabled
+        self.web_search_enabled = web_search_enabled
         self._sdk = self._load_sdk()
 
     @staticmethod
@@ -113,6 +128,24 @@ class CodexTransport:
         temperature: float,
     ) -> TransportResponse:
         """Call Codex SDK and normalize result."""
+        trace_id = uuid4().hex[:8]
+        timeout_s = max(1, int(self.timeout_seconds or 1))
+        started = time.monotonic()
+        model_name = model or "codex/default"
+        tool_defs = tools or []
+
+        if self.diagnostic_logging:
+            logger.info(
+                f"[codex-sdk:{trace_id}] chat start model={model_name} "
+                f"messages={len(messages)} tools={len(tool_defs)} timeout_s={timeout_s}"
+            )
+        if self.diagnostic_logging:
+            logger.debug(
+                f"[codex-sdk:{trace_id}] opts profile={self.profile!r} workspace={self.workspace!r} "
+                f"sandbox={self.sandbox_mode} approval={self.approval_policy} "
+                f"network={self.network_access_enabled} web_search={self.web_search_enabled}"
+            )
+
         try:
             # Legacy guessed SDK API support.
             run_chat = getattr(self._sdk, "chat", None)
@@ -131,17 +164,48 @@ class CodexTransport:
                 if self.workspace:
                     kwargs["workspace"] = self.workspace
 
-                raw = run_chat(**kwargs)
-                if hasattr(raw, "__await__"):
-                    raw = await raw
-                return self._normalize_response(raw)
+                raw = await self._invoke_with_timeout(
+                    run_chat,
+                    timeout_s=timeout_s,
+                    **kwargs,
+                )
+                response = self._normalize_response(raw)
+                elapsed_ms = int((time.monotonic() - started) * 1000)
+                if self.diagnostic_logging:
+                    logger.info(
+                        f"[codex-sdk:{trace_id}] chat ok path=legacy finish_reason={response.finish_reason} "
+                        f"tool_calls={len(response.tool_calls)} elapsed_ms={elapsed_ms}"
+                    )
+                return response
 
             # Official openai-codex-sdk path.
             if hasattr(self._sdk, "Codex"):
-                return await self._chat_via_official_sdk(messages, tools, model)
+                response = await self._chat_via_official_sdk(messages, tool_defs, model)
+                elapsed_ms = int((time.monotonic() - started) * 1000)
+                if self.diagnostic_logging:
+                    logger.info(
+                        f"[codex-sdk:{trace_id}] chat ok path=official finish_reason={response.finish_reason} "
+                        f"tool_calls={len(response.tool_calls)} elapsed_ms={elapsed_ms}"
+                    )
+                return response
 
             raise RuntimeError("Codex SDK does not expose a supported runtime API")
+        except asyncio.TimeoutError as e:
+            elapsed_ms = int((time.monotonic() - started) * 1000)
+            if self.diagnostic_logging:
+                logger.error(
+                    f"[codex-sdk:{trace_id}] chat timeout model={model_name} "
+                    f"elapsed_ms={elapsed_ms} timeout_s={timeout_s}"
+                )
+            raise RuntimeError(
+                f"Codex SDK chat call timed out after {timeout_s}s"
+            ) from e
         except Exception as e:
+            elapsed_ms = int((time.monotonic() - started) * 1000)
+            if self.diagnostic_logging:
+                logger.exception(
+                    f"[codex-sdk:{trace_id}] chat failed model={model_name} elapsed_ms={elapsed_ms}: {e}"
+                )
             raise RuntimeError(f"Codex SDK chat call failed: {e}") from e
 
     async def _chat_via_official_sdk(
@@ -152,6 +216,7 @@ class CodexTransport:
     ) -> TransportResponse:
         """Adapt nanobot chat/tools into the official openai-codex-sdk turn model."""
         sdk = self._sdk
+        timeout_s = max(1, int(self.timeout_seconds or 1))
 
         env = dict(os.environ)
         if self.profile:
@@ -159,10 +224,10 @@ class CodexTransport:
 
         codex = sdk.Codex(options={"env": env})
         thread_opts: dict[str, Any] = {
-            "sandboxMode": "workspace-write",
-            "approvalPolicy": "never",
-            "networkAccessEnabled": True,
-            "webSearchEnabled": True,
+            "sandboxMode": self.sandbox_mode,
+            "approvalPolicy": self.approval_policy,
+            "networkAccessEnabled": self.network_access_enabled,
+            "webSearchEnabled": self.web_search_enabled,
             "skipGitRepoCheck": self.skip_git_repo_check,
         }
         if model:
@@ -173,9 +238,16 @@ class CodexTransport:
         thread = codex.start_thread(thread_opts)
 
         output_schema = self._build_output_schema(tools or [])
-        turn = await thread.run(
-            self._build_prompt(messages, tools or []),
+        prompt = self._build_prompt(messages, tools or [])
+        if self.diagnostic_logging:
+            logger.debug(
+                f"[codex-sdk] official thread.run prompt_chars={len(prompt)} schema_keys={list(output_schema.keys())}"
+            )
+        turn = await self._invoke_with_timeout(
+            thread.run,
+            prompt,
             {"outputSchema": output_schema},
+            timeout_s=timeout_s,
         )
 
         usage: dict[str, int] = {}
@@ -188,6 +260,26 @@ class CodexTransport:
             }
 
         return self._normalize_response(getattr(turn, "final_response", ""))
+
+    @staticmethod
+    async def _invoke_with_timeout(
+        fn: Any,
+        *args: Any,
+        timeout_s: int,
+        **kwargs: Any,
+    ) -> Any:
+        """Invoke SDK call that may be sync or async with enforced timeout."""
+        if inspect.iscoroutinefunction(fn):
+            return await asyncio.wait_for(fn(*args, **kwargs), timeout=timeout_s)
+
+        # If fn is synchronous, run it off the event loop so timeout can fire.
+        result = await asyncio.wait_for(
+            asyncio.to_thread(fn, *args, **kwargs),
+            timeout=timeout_s,
+        )
+        if inspect.isawaitable(result):
+            return await asyncio.wait_for(result, timeout=timeout_s)
+        return result
 
     @staticmethod
     def _build_prompt(messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> str:

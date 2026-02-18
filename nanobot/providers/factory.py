@@ -33,6 +33,11 @@ def create_provider(config):
             strict_auth=codex_cfg.strict_auth,
             skip_git_repo_check=codex_cfg.skip_git_repo_check,
             native_tools=codex_cfg.native_tools,
+            sandbox_mode=codex_cfg.sandbox_mode,
+            approval_policy=codex_cfg.approval_policy,
+            network_access_enabled=codex_cfg.network_access_enabled,
+            web_search_enabled=codex_cfg.web_search_enabled,
+            diagnostic_logging=codex_cfg.diagnostic_logging,
         )
 
     p = config.get_provider()

@@ -187,6 +187,11 @@ class CodexProviderConfig(BaseModel):
     strict_auth: bool = True
     skip_git_repo_check: bool = True
     native_tools: list[str] = Field(default_factory=lambda: ["exec", "web_search", "web_fetch"])
+    sandbox_mode: str = "workspace-write"  # e.g. "workspace-write" or "danger-full-access"
+    approval_policy: str = "never"  # e.g. "never", "on-request", "on-failure", "untrusted"
+    network_access_enabled: bool = True
+    web_search_enabled: bool = True
+    diagnostic_logging: bool = False
 
 
 class ProvidersConfig(BaseModel):

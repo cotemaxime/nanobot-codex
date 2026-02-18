@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from typing import Any
 from loguru import logger
 from telegram import BotCommand, Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -13,6 +14,32 @@ from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
 from nanobot.config.schema import TelegramConfig
+
+TELEGRAM_MAX_MESSAGE_CHARS = 3800
+
+
+def _split_message(text: str, max_chars: int = TELEGRAM_MAX_MESSAGE_CHARS) -> list[str]:
+    """Split long text into Telegram-safe chunks, preferring paragraph/newline boundaries."""
+    if len(text) <= max_chars:
+        return [text]
+
+    chunks: list[str] = []
+    remaining = text
+    while len(remaining) > max_chars:
+        split_at = remaining.rfind("\n\n", 0, max_chars)
+        if split_at < 0:
+            split_at = remaining.rfind("\n", 0, max_chars)
+        if split_at < 0:
+            split_at = max_chars
+        chunk = remaining[:split_at].strip()
+        if not chunk:
+            chunk = remaining[:max_chars]
+            split_at = max_chars
+        chunks.append(chunk)
+        remaining = remaining[split_at:].lstrip()
+    if remaining:
+        chunks.append(remaining)
+    return chunks
 
 
 def _markdown_to_telegram_html(text: str) -> str:
@@ -92,6 +119,7 @@ class TelegramChannel(BaseChannel):
         BotCommand("start", "Start the bot"),
         BotCommand("new", "Start a new conversation"),
         BotCommand("help", "Show available commands"),
+        BotCommand("last", "Resend last assistant response"),
         BotCommand("skills", "List available skills"),
         BotCommand("skill", "Configure active skills for this chat/topic"),
         BotCommand("model", "Configure model override for this chat/topic"),
@@ -130,6 +158,7 @@ class TelegramChannel(BaseChannel):
         self._app.add_handler(CommandHandler("start", self._on_start))
         self._app.add_handler(CommandHandler("new", self._forward_command))
         self._app.add_handler(CommandHandler("help", self._forward_command))
+        self._app.add_handler(CommandHandler("last", self._forward_command))
         self._app.add_handler(CommandHandler("skills", self._forward_command))
         self._app.add_handler(CommandHandler("skill", self._forward_command))
         self._app.add_handler(CommandHandler("model", self._forward_command))
@@ -142,6 +171,8 @@ class TelegramChannel(BaseChannel):
                 self._on_message
             )
         )
+        # Reaction updates (Telegram Bot API update types: message_reaction / message_reaction_count)
+        self._register_reaction_handlers()
         
         logger.info("Starting Telegram bot (polling mode)...")
         
@@ -161,7 +192,7 @@ class TelegramChannel(BaseChannel):
         
         # Start polling (this runs until stopped)
         await self._app.updater.start_polling(
-            allowed_updates=["message"],
+            allowed_updates=self._allowed_updates(),
             drop_pending_updates=True  # Ignore old messages on startup
         )
         
@@ -196,16 +227,17 @@ class TelegramChannel(BaseChannel):
         try:
             # chat_id should be the Telegram chat ID (integer)
             chat_id = int(msg.chat_id)
-            # Convert markdown to Telegram HTML
-            html_content = _markdown_to_telegram_html(msg.content)
             telegram_meta = (msg.metadata or {}).get("telegram", {})
             thread_id = telegram_meta.get("message_thread_id")
-            await self._app.bot.send_message(
-                chat_id=chat_id,
-                text=html_content,
-                parse_mode="HTML",
-                message_thread_id=thread_id,
-            )
+            for part in _split_message(msg.content or ""):
+                # Convert markdown to Telegram HTML per chunk
+                html_content = _markdown_to_telegram_html(part)
+                await self._app.bot.send_message(
+                    chat_id=chat_id,
+                    text=html_content,
+                    parse_mode="HTML",
+                    message_thread_id=thread_id,
+                )
         except ValueError:
             logger.error(f"Invalid chat_id: {msg.chat_id}")
         except Exception as e:
@@ -214,11 +246,12 @@ class TelegramChannel(BaseChannel):
             try:
                 telegram_meta = (msg.metadata or {}).get("telegram", {})
                 thread_id = telegram_meta.get("message_thread_id")
-                await self._app.bot.send_message(
-                    chat_id=int(msg.chat_id),
-                    text=msg.content,
-                    message_thread_id=thread_id,
-                )
+                for part in _split_message(msg.content or ""):
+                    await self._app.bot.send_message(
+                        chat_id=int(msg.chat_id),
+                        text=part,
+                        message_thread_id=thread_id,
+                    )
             except Exception as e2:
                 logger.error(f"Error sending Telegram message: {e2}")
     
@@ -357,6 +390,164 @@ class TelegramChannel(BaseChannel):
                 "session_key": f"{self.name}:{str_chat_id}:{message.message_thread_id}" if message.message_thread_id else None,
             }
         )
+
+    @staticmethod
+    def _normalize_reaction_item(item: Any) -> str:
+        """Normalize Telegram reaction objects to compact text."""
+        if item is None:
+            return ""
+        emoji = getattr(item, "emoji", None)
+        if isinstance(emoji, str) and emoji:
+            return emoji
+        custom_id = getattr(item, "custom_emoji_id", None)
+        if isinstance(custom_id, str) and custom_id:
+            return f"custom:{custom_id}"
+        reaction_type = getattr(item, "type", None)
+        if isinstance(reaction_type, str) and reaction_type:
+            return reaction_type
+        return str(item)
+
+    async def _on_reaction(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle Telegram message reaction updates."""
+        reaction = update.message_reaction
+        if not reaction:
+            return
+
+        user = getattr(reaction, "user", None) or update.effective_user
+        actor_chat = getattr(reaction, "actor_chat", None)
+        sender_id = ""
+        username = None
+        first_name = None
+        if user:
+            sender_id = str(getattr(user, "id", ""))
+            username = getattr(user, "username", None)
+            first_name = getattr(user, "first_name", None)
+        elif actor_chat:
+            sender_id = str(getattr(actor_chat, "id", ""))
+            first_name = getattr(actor_chat, "title", None)
+        if username:
+            sender_id = f"{sender_id}|{username}"
+        if not sender_id:
+            return
+
+        chat = getattr(reaction, "chat", None)
+        chat_id = str(getattr(chat, "id", "")) if chat else ""
+        if not chat_id:
+            return
+
+        old_reaction = [self._normalize_reaction_item(i) for i in getattr(reaction, "old_reaction", [])]
+        new_reaction = [self._normalize_reaction_item(i) for i in getattr(reaction, "new_reaction", [])]
+        old_clean = [r for r in old_reaction if r]
+        new_clean = [r for r in new_reaction if r]
+
+        message_id = getattr(reaction, "message_id", None)
+        actor = first_name or username or sender_id.split("|", 1)[0]
+        old_text = ", ".join(old_clean) if old_clean else "(none)"
+        new_text = ", ".join(new_clean) if new_clean else "(none)"
+        content = (
+            f"[telegram_reaction] {actor} reacted on message {message_id}: "
+            f"{old_text} -> {new_text}"
+        )
+
+        await self._handle_message(
+            sender_id=sender_id,
+            chat_id=chat_id,
+            content=content,
+            metadata={
+                "event_type": "telegram_message_reaction",
+                "message_id": message_id,
+                "user_id": getattr(user, "id", None),
+                "username": username,
+                "first_name": first_name,
+                "telegram": {
+                    "message_thread_id": None,
+                    "reaction_old": old_clean,
+                    "reaction_new": new_clean,
+                },
+            },
+        )
+
+    async def _on_reaction_count(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle Telegram anonymous reaction-count updates."""
+        reaction_count = update.message_reaction_count
+        if not reaction_count:
+            return
+
+        chat = getattr(reaction_count, "chat", None)
+        chat_id = str(getattr(chat, "id", "")) if chat else ""
+        if not chat_id:
+            return
+
+        message_id = getattr(reaction_count, "message_id", None)
+        counts = getattr(reaction_count, "reactions", []) or []
+        normalized_counts: list[dict[str, Any]] = []
+        parts: list[str] = []
+        for item in counts:
+            reaction_key = self._normalize_reaction_item(getattr(item, "type", None))
+            count = int(getattr(item, "total_count", 0) or 0)
+            normalized_counts.append({"reaction": reaction_key, "count": count})
+            if reaction_key:
+                parts.append(f"{reaction_key} x{count}")
+
+        count_text = ", ".join(parts) if parts else "(none)"
+        content = f"[telegram_reaction_count] message {message_id}: {count_text}"
+
+        # Telegram reaction-count updates are anonymous; use synthetic sender id.
+        await self._handle_message(
+            sender_id=f"telegram_reaction_count:{chat_id}",
+            chat_id=chat_id,
+            content=content,
+            metadata={
+                "event_type": "telegram_message_reaction_count",
+                "message_id": message_id,
+                "telegram": {
+                    "message_thread_id": None,
+                    "reaction_counts": normalized_counts,
+                },
+            },
+        )
+
+    def _register_reaction_handlers(self) -> None:
+        """Register reaction handlers only when current PTB version supports them."""
+        if not self._app:
+            return
+
+        update_type = getattr(filters, "UpdateType", None)
+        status_update = getattr(filters, "StatusUpdate", None)
+        reaction_filter = None
+        reaction_count_filter = None
+
+        if update_type:
+            reaction_filter = getattr(update_type, "MESSAGE_REACTION", None)
+            reaction_count_filter = getattr(update_type, "MESSAGE_REACTION_COUNT", None)
+
+        # Compatibility fallback for PTB versions that expose reaction filters under StatusUpdate.
+        if reaction_filter is None and status_update:
+            reaction_filter = getattr(status_update, "MESSAGE_REACTION", None)
+        if reaction_count_filter is None and status_update:
+            reaction_count_filter = getattr(status_update, "MESSAGE_REACTION_COUNT", None)
+
+        if reaction_filter is not None:
+            self._app.add_handler(MessageHandler(reaction_filter, self._on_reaction))
+        if reaction_count_filter is not None:
+            self._app.add_handler(MessageHandler(reaction_count_filter, self._on_reaction_count))
+
+        if reaction_filter is None and reaction_count_filter is None:
+            logger.warning(
+                "Telegram reaction updates are not supported by this python-telegram-bot version; "
+                "message_reaction handlers were not registered."
+            )
+
+    def _allowed_updates(self) -> list[str]:
+        """Build allowed updates list compatible with installed PTB version."""
+        updates = ["message"]
+        has_message_reaction = hasattr(Update, "message_reaction")
+        has_message_reaction_count = hasattr(Update, "message_reaction_count")
+        if has_message_reaction:
+            updates.append("message_reaction")
+        if has_message_reaction_count:
+            updates.append("message_reaction_count")
+        return updates
     
     def _start_typing(self, chat_id: str) -> None:
         """Start sending 'typing...' indicator for a chat."""

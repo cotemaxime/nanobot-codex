@@ -1,14 +1,28 @@
+import asyncio
+
 import pytest
 
 from nanobot.agent.loop import AgentLoop
+from nanobot.bus.events import InboundMessage
 from nanobot.bus.queue import MessageBus
+from nanobot.providers.base import LLMProvider, LLMResponse
 from nanobot.providers.codex_sdk_provider import CodexSDKProvider
 from nanobot.providers.codex_transport import TransportResponse, TransportToolCall
 from nanobot.session.manager import Session
 
 
 class FakeTransport:
-    def __init__(self, profile=None, workspace=None, timeout_seconds=180, skip_git_repo_check=True):
+    def __init__(
+        self,
+        profile=None,
+        workspace=None,
+        timeout_seconds=180,
+        skip_git_repo_check=True,
+        sandbox_mode="workspace-write",
+        approval_policy="never",
+        network_access_enabled=True,
+        web_search_enabled=True,
+    ):
         self.responses = []
 
     def validate_session(self):
@@ -37,6 +51,31 @@ class InMemorySessionManager:
 
     def invalidate(self, key: str):
         self._sessions.pop(key, None)
+
+
+class SlowFastProvider(LLMProvider):
+    def get_default_model(self) -> str:
+        return "test/default"
+
+    async def chat(self, messages, tools=None, model=None, max_tokens=4096, temperature=0.7):
+        prompt = (messages[-1].get("content") if messages else "") or ""
+        if "slow" in prompt:
+            await asyncio.sleep(0.2)
+            return LLMResponse(content="slow done")
+        await asyncio.sleep(0.01)
+        return LLMResponse(content="fast done")
+
+
+class ReplayProvider(LLMProvider):
+    def __init__(self, reply: str):
+        super().__init__()
+        self.reply = reply
+
+    def get_default_model(self) -> str:
+        return "test/default"
+
+    async def chat(self, messages, tools=None, model=None, max_tokens=4096, temperature=0.7):
+        return LLMResponse(content=self.reply)
 
 
 @pytest.mark.asyncio
@@ -89,6 +128,41 @@ async def test_agent_loop_delegated_tool_roundtrip(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_agent_loop_does_not_inject_reflection_user_turn(monkeypatch, tmp_path):
+    monkeypatch.setattr("nanobot.providers.codex_sdk_provider.CodexTransport", FakeTransport)
+
+    f = tmp_path / "note.txt"
+    f.write_text("tool output", encoding="utf-8")
+
+    provider = CodexSDKProvider(default_model="codex/default", workspace=str(tmp_path))
+
+    def _second_turn(messages, _tools, _model):
+        assert messages[-1]["role"] == "tool"
+        assert "Reflect on the results and decide next steps." not in str(messages)
+        return TransportResponse(content="final")
+
+    provider.transport.responses = [
+        TransportResponse(
+            content="Reading file",
+            tool_calls=[TransportToolCall(id="r1", name="read_file", arguments={"path": str(f)})],
+            finish_reason="tool_calls",
+        ),
+        _second_turn,
+    ]
+
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=provider,
+        workspace=tmp_path,
+        session_manager=InMemorySessionManager(),
+        model="codex/default",
+    )
+
+    response = await loop.process_direct("read the file", session_key="cli:test-reflect", channel="cli", chat_id="test-reflect")
+    assert response == "final"
+
+
+@pytest.mark.asyncio
 async def test_memory_consolidation_json_contract_still_works(monkeypatch, tmp_path):
     monkeypatch.setattr("nanobot.providers.codex_sdk_provider.CodexTransport", FakeTransport)
 
@@ -121,3 +195,236 @@ async def test_memory_consolidation_json_contract_still_works(monkeypatch, tmp_p
     assert history_file.exists()
     assert "Prefers Codex subscription mode." in memory_file.read_text(encoding="utf-8")
     assert "Discussed codex provider" in history_file.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_agent_can_switch_model_via_set_model_tool(monkeypatch, tmp_path):
+    monkeypatch.setattr("nanobot.providers.codex_sdk_provider.CodexTransport", FakeTransport)
+
+    provider = CodexSDKProvider(default_model="gpt-5-codex-mini", workspace=str(tmp_path))
+    provider.transport.responses = [
+        TransportResponse(
+            content="Switching model",
+            tool_calls=[
+                TransportToolCall(
+                    id="m1",
+                    name="set_model",
+                    arguments={"action": "set", "model": "gpt-5.3-codex", "persist": True},
+                )
+            ],
+            finish_reason="tool_calls",
+        ),
+        lambda _messages, _tools, model: TransportResponse(content=f"final via {model}"),
+        lambda _messages, _tools, model: TransportResponse(content=f"next turn via {model}"),
+    ]
+
+    manager = InMemorySessionManager()
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=provider,
+        workspace=tmp_path,
+        session_manager=manager,
+        model="gpt-5-codex-mini",
+    )
+
+    first = await loop.process_direct("handle complex coding task", session_key="cli:model", channel="cli", chat_id="model")
+    assert "final via gpt-5.3-codex" in first
+
+    session = manager.get_or_create("cli:model")
+    assert session.metadata.get("model_override") == "gpt-5.3-codex"
+
+    second = await loop.process_direct("follow-up", session_key="cli:model", channel="cli", chat_id="model")
+    assert "next turn via gpt-5.3-codex" in second
+
+
+@pytest.mark.asyncio
+async def test_last_command_resends_previous_assistant_message(monkeypatch, tmp_path):
+    monkeypatch.setattr("nanobot.providers.codex_sdk_provider.CodexTransport", FakeTransport)
+
+    manager = InMemorySessionManager()
+    session = manager.get_or_create("cli:last")
+    session.add_message("user", "first question")
+    session.add_message("assistant", "first answer")
+    session.add_message("user", "second question")
+    session.add_message("assistant", "second answer")
+    manager.save(session)
+
+    provider = CodexSDKProvider(default_model="codex/default", workspace=str(tmp_path))
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=provider,
+        workspace=tmp_path,
+        session_manager=manager,
+        model="codex/default",
+    )
+
+    result = await loop.process_direct("/last", session_key="cli:last", channel="cli", chat_id="last")
+    assert result == "second answer"
+
+
+@pytest.mark.asyncio
+async def test_new_command_with_bot_mention_resets_without_model_call(monkeypatch, tmp_path):
+    monkeypatch.setattr("nanobot.providers.codex_sdk_provider.CodexTransport", FakeTransport)
+
+    manager = InMemorySessionManager()
+    session = manager.get_or_create("telegram:chat")
+    session.add_message("user", "old question")
+    session.add_message("assistant", "old answer")
+    manager.save(session)
+
+    provider = CodexSDKProvider(default_model="codex/default", workspace=str(tmp_path))
+
+    async def _should_not_call_model(*args, **kwargs):
+        raise AssertionError("model should not be called for /new command")
+
+    provider.chat = _should_not_call_model  # type: ignore[assignment]
+
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=provider,
+        workspace=tmp_path,
+        session_manager=manager,
+        model="codex/default",
+    )
+
+    result = await loop.process_direct("/new@nanobot", session_key="telegram:chat", channel="telegram", chat_id="chat")
+    assert "New session started" in result
+    assert manager.get_or_create("telegram:chat").messages == []
+
+
+@pytest.mark.asyncio
+async def test_agent_run_processes_sessions_concurrently(tmp_path):
+    bus = MessageBus()
+    loop = AgentLoop(
+        bus=bus,
+        provider=SlowFastProvider(),
+        workspace=tmp_path,
+        session_manager=InMemorySessionManager(),
+        model="test/default",
+    )
+    run_task = asyncio.create_task(loop.run())
+    try:
+        await bus.publish_inbound(InboundMessage(
+            channel="telegram",
+            sender_id="u1",
+            chat_id="slow-chat",
+            content="please do slow work",
+        ))
+        await asyncio.sleep(0.02)
+        await bus.publish_inbound(InboundMessage(
+            channel="telegram",
+            sender_id="u2",
+            chat_id="fast-chat",
+            content="quick status",
+        ))
+
+        first = await asyncio.wait_for(bus.consume_outbound(), timeout=2.0)
+        second = await asyncio.wait_for(bus.consume_outbound(), timeout=2.0)
+
+        assert first.chat_id == "fast-chat"
+        assert first.content == "fast done"
+        assert second.chat_id == "slow-chat"
+        assert second.content == "slow done"
+    finally:
+        loop.stop()
+        await asyncio.wait_for(run_task, timeout=3.0)
+
+
+@pytest.mark.asyncio
+async def test_telegram_reaction_thumbs_up_marks_completed(tmp_path):
+    manager = InMemorySessionManager()
+    session = manager.get_or_create("telegram:chat")
+    session.add_message("user", "finish item A")
+    session.add_message("assistant", "Done item A")
+    manager.save(session)
+
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=ReplayProvider("unused"),
+        workspace=tmp_path,
+        session_manager=manager,
+        model="test/default",
+    )
+
+    response = await loop._process_message(InboundMessage(
+        channel="telegram",
+        sender_id="1",
+        chat_id="chat",
+        content="[telegram_reaction] user reacted on message 10: (none) -> 👍",
+        metadata={
+            "event_type": "telegram_message_reaction",
+            "message_id": 10,
+            "telegram": {"reaction_new": ["👍"], "reaction_old": []},
+        },
+    ))
+
+    assert response is not None
+    assert "Marked this as completed" in response.content
+    updated = manager.get_or_create("telegram:chat")
+    approvals = updated.metadata.get("approved_events")
+    assert isinstance(approvals, list) and approvals
+    assert approvals[-1]["message_id"] == 10
+
+
+@pytest.mark.asyncio
+async def test_telegram_reaction_redo_resends_last_assistant(tmp_path):
+    manager = InMemorySessionManager()
+    session = manager.get_or_create("telegram:chat")
+    session.add_message("user", "question")
+    session.add_message("assistant", "last answer")
+    manager.save(session)
+
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=ReplayProvider("unused"),
+        workspace=tmp_path,
+        session_manager=manager,
+        model="test/default",
+    )
+
+    response = await loop._process_message(InboundMessage(
+        channel="telegram",
+        sender_id="1",
+        chat_id="chat",
+        content="[telegram_reaction] user reacted on message 11: (none) -> ♻️",
+        metadata={
+            "event_type": "telegram_message_reaction",
+            "message_id": 11,
+            "telegram": {"reaction_new": ["♻️"], "reaction_old": []},
+        },
+    ))
+
+    assert response is not None
+    assert response.content == "last answer"
+
+
+@pytest.mark.asyncio
+async def test_telegram_reaction_retry_replays_last_user_request(tmp_path):
+    manager = InMemorySessionManager()
+    session = manager.get_or_create("telegram:chat")
+    session.add_message("user", "please do it again")
+    session.add_message("assistant", "old answer")
+    manager.save(session)
+
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=ReplayProvider("new retried answer"),
+        workspace=tmp_path,
+        session_manager=manager,
+        model="test/default",
+    )
+
+    response = await loop._process_message(InboundMessage(
+        channel="telegram",
+        sender_id="1",
+        chat_id="chat",
+        content="[telegram_reaction] user reacted on message 12: (none) -> 🔁",
+        metadata={
+            "event_type": "telegram_message_reaction",
+            "message_id": 12,
+            "telegram": {"reaction_new": ["🔁"], "reaction_old": []},
+        },
+    ))
+
+    assert response is not None
+    assert response.content == "new retried answer"

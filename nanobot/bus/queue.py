@@ -29,6 +29,23 @@ class MessageBus:
     async def consume_inbound(self) -> InboundMessage:
         """Consume the next inbound message (blocks until available)."""
         return await self.inbound.get()
+
+    @staticmethod
+    def _resolve_session_key(msg: InboundMessage) -> str:
+        """Resolve effective session key for an inbound message."""
+        metadata_session_key = None
+        if isinstance(msg.metadata, dict):
+            metadata_session_key = msg.metadata.get("session_key")
+        if isinstance(metadata_session_key, str) and metadata_session_key:
+            return metadata_session_key
+        return msg.session_key
+
+    def has_pending_inbound_for_session(self, session_key: str) -> bool:
+        """Check if inbound queue already contains newer work for the same session."""
+        q = getattr(self.inbound, "_queue", None)  # deque[InboundMessage], implementation detail
+        if q is None:
+            return False
+        return any(self._resolve_session_key(msg) == session_key for msg in q)
     
     async def publish_outbound(self, msg: OutboundMessage) -> None:
         """Publish a response from the agent to channels."""
