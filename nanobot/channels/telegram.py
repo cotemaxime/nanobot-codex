@@ -157,6 +157,7 @@ class TelegramChannel(BaseChannel):
         self._app: Application | None = None
         self._chat_ids: dict[str, int] = {}  # Map sender_id to chat_id for replies
         self._typing_tasks: dict[str, asyncio.Task] = {}  # chat_id -> typing loop task
+        self._reaction_handler_mode: str = "none"  # none | filters | fallback
     
     async def start(self) -> None:
         """Start the Telegram bot with long polling."""
@@ -560,6 +561,16 @@ class TelegramChannel(BaseChannel):
             },
         )
 
+    async def _on_reaction_update_fallback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """
+        Fallback reaction router for PTB variants without reaction-specific filters.
+        """
+        if getattr(update, "message_reaction", None):
+            await self._on_reaction(update, context)
+            return
+        if getattr(update, "message_reaction_count", None):
+            await self._on_reaction_count(update, context)
+
     def _register_reaction_handlers(self) -> None:
         """Register reaction handlers only when current PTB version supports them."""
         if not self._app:
@@ -584,21 +595,34 @@ class TelegramChannel(BaseChannel):
             self._app.add_handler(MessageHandler(reaction_filter, self._on_reaction))
         if reaction_count_filter is not None:
             self._app.add_handler(MessageHandler(reaction_count_filter, self._on_reaction_count))
+        if reaction_filter is not None or reaction_count_filter is not None:
+            self._reaction_handler_mode = "filters"
 
         if reaction_filter is None and reaction_count_filter is None:
-            logger.warning(
-                "Telegram reaction updates are not supported by this python-telegram-bot version; "
-                "message_reaction handlers were not registered."
-            )
+            # Some PTB versions expose reaction fields on Update but not filter constants.
+            try:
+                from telegram.ext import TypeHandler
+                self._app.add_handler(TypeHandler(Update, self._on_reaction_update_fallback))
+                self._reaction_handler_mode = "fallback"
+                logger.info(
+                    "Telegram reaction filters are unavailable in this python-telegram-bot version; "
+                    "using Update-level fallback handler."
+                )
+            except Exception:
+                self._reaction_handler_mode = "none"
+                logger.warning(
+                    "Telegram reaction updates are not supported by this python-telegram-bot version; "
+                    "message_reaction handlers were not registered."
+                )
 
     def _allowed_updates(self) -> list[str]:
         """Build allowed updates list compatible with installed PTB version."""
         updates = ["message"]
         has_message_reaction = hasattr(Update, "message_reaction")
         has_message_reaction_count = hasattr(Update, "message_reaction_count")
-        if has_message_reaction:
+        if has_message_reaction or self._reaction_handler_mode in {"filters", "fallback"}:
             updates.append("message_reaction")
-        if has_message_reaction_count:
+        if has_message_reaction_count or self._reaction_handler_mode in {"filters", "fallback"}:
             updates.append("message_reaction_count")
         return updates
     
