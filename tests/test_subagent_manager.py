@@ -7,7 +7,7 @@ from nanobot.providers.base import LLMResponse
 
 class FakeProvider:
     def get_default_model(self) -> str:
-        return "codex/default"
+        return "openai-codex/gpt-5.1-codex"
 
     async def chat(self, messages, tools=None, model=None, max_tokens=4096, temperature=0.7):
         return LLMResponse(content="done")
@@ -36,4 +36,3 @@ async def test_spawn_sends_immediate_background_notice(tmp_path):
     assert outbound.chat_id == "chat-1"
     assert "Started background task" in outbound.content
     assert "final result" in outbound.content
-

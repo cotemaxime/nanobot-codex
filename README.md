@@ -871,6 +871,8 @@ nanobot/
 
 PRs welcome! The codebase is intentionally small and readable. 🤗
 
+For fork maintenance after upstream syncs, see [`MERGE_GUARDS.md`](MERGE_GUARDS.md) for kept-feature guardrails and the test checklist.
+
 **Roadmap** — Pick an item and [open a PR](https://github.com/HKUDS/nanobot/pulls)!
 
 - [ ] **Multi-modal** — See and hear (images, voice, video)
