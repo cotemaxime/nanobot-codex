@@ -281,6 +281,87 @@ async def test_new_command_with_bot_mention_resets_without_model_call(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_topic_command_response_preserves_telegram_thread_metadata(tmp_path):
+    manager = InMemorySessionManager()
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=ScriptedProvider(),
+        workspace=tmp_path,
+        session_manager=manager,
+        model="test/default",
+    )
+
+    inbound = InboundMessage(
+        channel="telegram",
+        sender_id="1|alice",
+        chat_id="1234",
+        content="/model",
+        metadata={
+            "telegram": {"message_thread_id": 99},
+            "session_key": "telegram:1234:99",
+        },
+    )
+
+    response = await loop._process_message(inbound)
+
+    assert response is not None
+    assert response.chat_id == "1234"
+    assert response.metadata.get("telegram", {}).get("message_thread_id") == 99
+    assert "Current model for this chat/topic" in response.content
+
+
+@pytest.mark.asyncio
+async def test_model_selection_rejects_non_numeric_input(tmp_path):
+    manager = InMemorySessionManager()
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=ScriptedProvider(),
+        workspace=tmp_path,
+        session_manager=manager,
+        model="test/default",
+    )
+
+    await loop.process_direct("/model", session_key="telegram:chat", channel="telegram", chat_id="chat")
+    result = await loop.process_direct(
+        "is it working?",
+        session_key="telegram:chat",
+        channel="telegram",
+        chat_id="chat",
+    )
+
+    assert "Invalid selection. Send a model number only" in result
+    session = manager.get_or_create("telegram:chat")
+    assert session.metadata.get("model_override") is None
+    assert session.metadata.get("pending_action") == "set_model"
+
+
+@pytest.mark.asyncio
+async def test_skill_selection_rejects_non_numeric_input(tmp_path):
+    manager = InMemorySessionManager()
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=ScriptedProvider(),
+        workspace=tmp_path,
+        session_manager=manager,
+        model="test/default",
+    )
+    loop.context.skills.list_skills = lambda: [{"name": "search"}, {"name": "git"}]  # type: ignore[method-assign]
+
+    await loop.process_direct("/skill", session_key="telegram:chat", channel="telegram", chat_id="chat")
+    result = await loop.process_direct(
+        "search",
+        session_key="telegram:chat",
+        channel="telegram",
+        chat_id="chat",
+    )
+
+    assert "Invalid selection. Send skill numbers only" in result
+    session = manager.get_or_create("telegram:chat")
+    assert session.metadata.get("active_skills") is None
+    assert session.metadata.get("pending_action") == "set_skills"
+
+
+@pytest.mark.asyncio
 async def test_agent_run_processes_sessions_concurrently(tmp_path):
     bus = MessageBus()
     loop = AgentLoop(
@@ -333,6 +414,12 @@ async def test_telegram_reaction_thumbs_up_marks_completed(tmp_path):
         session_manager=manager,
         model="test/default",
     )
+    consolidate_calls = []
+
+    async def _fake_consolidate(s, archive_all=False, force=False):
+        consolidate_calls.append((s.key, archive_all, force))
+
+    loop._consolidate_memory = _fake_consolidate  # type: ignore[method-assign]
 
     response = await loop._process_message(InboundMessage(
         channel="telegram",
@@ -348,6 +435,9 @@ async def test_telegram_reaction_thumbs_up_marks_completed(tmp_path):
 
     assert response is not None
     assert "Marked this as completed" in response.content
+    await asyncio.sleep(0)
+    assert consolidate_calls
+    assert consolidate_calls[-1] == ("telegram:chat", False, True)
     updated = manager.get_or_create("telegram:chat")
     approvals = updated.metadata.get("approved_events")
     assert isinstance(approvals, list) and approvals
