@@ -192,7 +192,6 @@ def onboard():
     console.print("\nNext steps:")
     console.print("  1. Choose provider mode in [cyan]~/.nanobot/config.json[/cyan]")
     console.print("     - API providers: set providers.<name>.apiKey")
-    console.print("     - Codex subscription: set providers.codex.enabled=true and authenticate with Codex first")
     console.print("  2. Chat: [cyan]nanobot agent -m \"Hello!\"[/cyan]")
     console.print("\n[dim]Want Telegram/WhatsApp? See: https://github.com/HKUDS/nanobot#-chat-apps[/dim]")
 
@@ -893,20 +892,10 @@ def status():
     console.print(f"Workspace: {workspace} {'[green]✓[/green]' if workspace.exists() else '[red]✗[/red]'}")
 
     if config_path.exists():
-        from nanobot.providers.codex_transport import CodexTransport
         from nanobot.providers.registry import PROVIDERS
 
         console.print(f"Model: {config.agents.defaults.model}")
-        codex_cfg = config.providers.codex
-        codex_enabled = bool(codex_cfg.enabled or config.agents.defaults.model.lower().startswith("codex/"))
-        session_ok, detail = CodexTransport.probe_session(codex_cfg.profile)
-        codex_state = "[green]available[/green]" if session_ok else "[yellow]unavailable[/yellow]"
-        if codex_enabled:
-            console.print(f"Codex: [green]enabled[/green] ({codex_state})")
-        else:
-            console.print(f"Codex: [dim]disabled[/dim] ({codex_state})")
-        console.print(f"  [dim]{detail}[/dim]")
-        
+
         # Check API keys from registry
         for spec in PROVIDERS:
             p = getattr(config.providers, spec.name, None)

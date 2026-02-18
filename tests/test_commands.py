@@ -5,8 +5,10 @@ from unittest.mock import patch
 from typer.testing import CliRunner
 
 import pytest
+from click.exceptions import Exit
 
-from nanobot.cli.commands import app
+from nanobot.cli.commands import _make_provider, app
+from nanobot.config.schema import Config
 
 runner = CliRunner()
 
@@ -93,39 +95,32 @@ def test_onboard_existing_workspace_safe_create(mock_paths):
     assert (workspace_dir / "AGENTS.md").exists()
 
 
-def test_status_shows_codex_session_state(monkeypatch, tmp_path):
+def test_status_shows_oauth_provider_line(monkeypatch, tmp_path):
     cfg = Config()
-    cfg.providers.codex.enabled = True
-    cfg.providers.codex.profile = "default"
-    cfg.agents.defaults.model = "codex/default"
+    cfg.agents.defaults.model = "openai-codex/gpt-5-codex"
 
     fake_config_path = tmp_path / "config.json"
     fake_config_path.write_text("{}", encoding="utf-8")
 
     monkeypatch.setattr("nanobot.config.loader.get_config_path", lambda: fake_config_path)
     monkeypatch.setattr("nanobot.config.loader.load_config", lambda: cfg)
-    monkeypatch.setattr(
-        "nanobot.providers.codex_transport.CodexTransport.probe_session",
-        lambda profile=None: (False, "No Codex session detected"),
-    )
 
     result = runner.invoke(app, ["status"])
 
     assert result.exit_code == 0
-    assert "Codex: enabled" in result.stdout
-    assert "No Codex session detected" in result.stdout
+    assert "Model: openai-codex/gpt-5-codex" in result.stdout
+    assert "OpenAI Codex: ✓ (OAuth)" in result.stdout
 
 
-def test_make_provider_surfaces_codex_auth_error(monkeypatch):
+def test_make_provider_surfaces_provider_creation_error(monkeypatch):
     cfg = Config()
-    cfg.providers.codex.enabled = True
+    cfg.agents.defaults.model = "anthropic/claude-3-5-haiku"
+    cfg.providers.anthropic.api_key = "test-key"
 
     monkeypatch.setattr(
-        "nanobot.providers.factory.create_provider",
-        lambda config: (_ for _ in ()).throw(RuntimeError("Codex session is unavailable")),
+        "nanobot.providers.litellm_provider.LiteLLMProvider.__init__",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("provider init failed")),
     )
 
-    with pytest.raises(Exit) as exc:
+    with pytest.raises(RuntimeError, match="provider init failed"):
         _make_provider(cfg)
-
-    assert exc.value.exit_code == 1
