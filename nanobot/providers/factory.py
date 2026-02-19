@@ -10,6 +10,14 @@ from nanobot.providers.litellm_provider import LiteLLMProvider
 from nanobot.providers.openai_codex_provider import OpenAICodexProvider
 
 
+def _normalize_sdk_model_name(model: str) -> str:
+    """Normalize model id for Codex SDK (uses raw ids like gpt-5-codex)."""
+    cleaned = (model or "").strip()
+    if cleaned.lower().startswith("openai-codex/"):
+        return cleaned.split("/", 1)[1]
+    return cleaned
+
+
 def create_provider(config):
     """Create an LLM provider from config."""
     model = config.agents.defaults.model
@@ -26,7 +34,7 @@ def create_provider(config):
         try:
             # Prefer Codex SDK path to enable native Codex web search/browsing.
             return CodexSDKProvider(
-                default_model=model,
+                default_model=_normalize_sdk_model_name(model),
                 workspace=str(config.workspace_path),
             )
         except Exception as e:

@@ -812,7 +812,11 @@ MCP tools are automatically discovered and registered on startup. The LLM can us
 |--------|---------|-------------|
 | `tools.restrictToWorkspace` | `false` | When `true`, restricts **all** agent tools (shell, file read/write/edit, list) to the workspace directory. Prevents path traversal and out-of-scope access. |
 | `agents.disabledSkills` | `[]` | Disable specific skills globally by name (case-insensitive), e.g. `["clawhub"]`. Disabled skills are hidden and cannot be loaded. |
-| `agents.codexWorker.model` | `"openai-codex/gpt-5.3-codex"` | Model used by the Codex SDK worker bridge when planner mode is `openai-codex/gpt-5.2`. |
+| `agents.codexWorker.model` | `"gpt-5.3-codex"` | Codex SDK worker model used by the planner bridge when planner mode is `openai-codex/gpt-5.2` (SDK model IDs are unprefixed). |
+| `agents.codexWorker.timeoutSeconds` | `600` | Codex SDK worker call timeout for delegated subagent runs. Increase for long web-research tasks. |
+| `agents.codexWorker.heartbeatIntervalSeconds` | `30` | Minimum heartbeat interval floor (seconds) for background tasks; scheduler uses 1m×2, 2m×2, 4m×2, … capped at 10m. |
+| `agents.defaults.runtimeLogFile` | `"~/.nanobot/history/agent.log"` | Persistent runtime log file for gateway/agent runs. |
+| `agents.defaults.runtimeLogLevel` | `"INFO"` | Runtime file log level (`DEBUG`, `INFO`, `WARNING`, etc.). |
 | `channels.*.allowFrom` | `[]` (allow all) | Whitelist of user IDs. Empty = allow everyone; non-empty = only listed users can interact. |
 
 

@@ -259,7 +259,45 @@ class CodexTransport:
                 + int(getattr(turn.usage, "output_tokens", 0)),
             }
 
-        return self._normalize_response(getattr(turn, "final_response", ""))
+        raw_final = getattr(turn, "final_response", None)
+        output_text = getattr(turn, "output_text", None) or getattr(turn, "text", None)
+        if not raw_final and isinstance(output_text, str) and output_text.strip():
+            raw_final = {
+                "content": output_text,
+                "tool_calls": [],
+                "finish_reason": "stop",
+                "reasoning_content": None,
+            }
+
+        response = self._normalize_response(raw_final if raw_final is not None else "")
+        if (not response.content or not str(response.content).strip()) and not response.tool_calls:
+            fallback = self._extract_turn_fallback_text(turn)
+            if fallback:
+                response.content = fallback
+            elif self.diagnostic_logging:
+                logger.warning(
+                    "[codex-sdk] official run returned empty content/tool_calls; "
+                    "turn_type={} raw_final_type={}",
+                    type(turn).__name__,
+                    type(raw_final).__name__ if raw_final is not None else "None",
+                )
+
+        return response
+
+    @staticmethod
+    def _extract_turn_fallback_text(turn: Any) -> str | None:
+        """Best-effort extraction of text from SDK turn object variants."""
+        for attr in ("output_text", "text", "final_text", "result"):
+            val = getattr(turn, attr, None)
+            if isinstance(val, str) and val.strip():
+                return val
+        final_response = getattr(turn, "final_response", None)
+        if isinstance(final_response, dict):
+            for key in ("text", "output_text", "content"):
+                val = final_response.get(key)
+                if isinstance(val, str) and val.strip():
+                    return val
+        return None
 
     @staticmethod
     async def _invoke_with_timeout(

@@ -150,12 +150,14 @@ def test_make_codex_worker_provider_uses_configured_model(monkeypatch, tmp_path)
     cfg.agents.codex_worker.model = "openai-codex/gpt-5.3-codex"
     cfg.agents.codex_worker.sandbox_mode = "danger-full-access"
     cfg.agents.codex_worker.approval_policy = "never"
+    cfg.agents.codex_worker.timeout_seconds = 600
     cfg.agents.codex_worker.network_access_enabled = True
     cfg.agents.codex_worker.web_search_enabled = True
 
     worker = _make_codex_worker_provider(cfg)
 
     assert worker is not None
-    assert captured["default_model"] == "openai-codex/gpt-5.3-codex"
+    assert captured["default_model"] == "gpt-5.3-codex"
+    assert captured["timeout_seconds"] == 600
     assert captured["sandbox_mode"] == "danger-full-access"
     assert captured["approval_policy"] == "never"

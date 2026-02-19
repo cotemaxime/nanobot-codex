@@ -96,6 +96,8 @@ class AgentLoop:
         disabled_skills: list[str] | None = None,
         subagent_provider: LLMProvider | None = None,
         spawn_bridge_mode: bool = False,
+        subagent_fallback_models: list[str] | None = None,
+        subagent_heartbeat_interval_seconds: int = 30,
     ):
         from nanobot.config.schema import ExecToolConfig
         from nanobot.cron.service import CronService
@@ -132,6 +134,8 @@ class AgentLoop:
             exec_config=self.exec_config,
             restrict_to_workspace=restrict_to_workspace,
             disabled_skills=list(self.disabled_skills),
+            fallback_models=subagent_fallback_models,
+            heartbeat_interval_seconds=subagent_heartbeat_interval_seconds,
         )
         
         self._running = False
@@ -261,7 +265,13 @@ class AgentLoop:
         await self._mcp_stack.__aenter__()
         await connect_mcp_servers(self._mcp_servers, self.tools, self._mcp_stack)
 
-    def _set_tool_context(self, channel: str, chat_id: str) -> None:
+    def _set_tool_context(
+        self,
+        channel: str,
+        chat_id: str,
+        metadata: dict[str, Any] | None = None,
+        session_key: str | None = None,
+    ) -> None:
         """Update context for all tools that need routing info."""
         if message_tool := self.tools.get("message"):
             if isinstance(message_tool, MessageTool):
@@ -269,7 +279,12 @@ class AgentLoop:
 
         if spawn_tool := self.tools.get("spawn"):
             if isinstance(spawn_tool, SpawnTool):
-                spawn_tool.set_context(channel, chat_id)
+                spawn_tool.set_context(
+                    channel,
+                    chat_id,
+                    metadata=metadata,
+                    session_key=session_key,
+                )
 
         if cron_tool := self.tools.get("cron"):
             if isinstance(cron_tool, CronTool):
@@ -545,6 +560,12 @@ class AgentLoop:
 
         key = self._resolve_session_key(msg, session_key)
         session = self.sessions.get_or_create(key)
+        self._set_tool_context(
+            msg.channel,
+            msg.chat_id,
+            metadata=msg.metadata or {},
+            session_key=key,
+        )
 
         # Telegram reaction events: persist event and trigger deterministic actions.
         event_type = ""
@@ -926,7 +947,17 @@ class AgentLoop:
             origin_channel = "cli"
             origin_chat_id = msg.chat_id
         
-        session_key = f"{origin_channel}:{origin_chat_id}"
+        origin_metadata: dict[str, Any] = {}
+        origin_session_key: str | None = None
+        if isinstance(msg.metadata, dict):
+            raw_meta = msg.metadata.get("origin_metadata")
+            if isinstance(raw_meta, dict):
+                origin_metadata = raw_meta
+            raw_session = msg.metadata.get("origin_session_key")
+            if isinstance(raw_session, str) and raw_session:
+                origin_session_key = raw_session
+
+        session_key = origin_session_key or f"{origin_channel}:{origin_chat_id}"
         session = self.sessions.get_or_create(session_key)
         model_for_session = self._normalize_model_name(session.metadata.get("model_override") or self.model) or self.model
         session_token: Token = self._active_session_ctx.set(session)
@@ -955,7 +986,8 @@ class AgentLoop:
         return OutboundMessage(
             channel=origin_channel,
             chat_id=origin_chat_id,
-            content=final_content
+            content=final_content,
+            metadata=origin_metadata,
         )
     
     async def _consolidate_memory(self, session, archive_all: bool = False, force: bool = False) -> None:

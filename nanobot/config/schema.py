@@ -187,14 +187,25 @@ class AgentDefaults(Base):
     temperature: float = 0.7
     max_tool_iterations: int = 20
     memory_window: int = 50
+    runtime_log_file: str = "~/.nanobot/history/agent.log"
+    runtime_log_level: str = "INFO"
 
 
 class CodexWorkerConfig(Base):
     """Codex SDK worker settings for delegated task execution."""
 
-    model: str = "openai-codex/gpt-5.3-codex"
+    model: str = "gpt-5.3-codex"
+    fallback_models: list[str] = Field(
+        default_factory=lambda: [
+            "gpt-5-codex",
+            "gpt-5.1-codex",
+            "gpt-5-codex-mini",
+        ]
+    )
     sandbox_mode: str = "danger-full-access"
     approval_policy: str = "never"
+    timeout_seconds: int = 600
+    heartbeat_interval_seconds: int = 30
     network_access_enabled: bool = True
     web_search_enabled: bool = True
 

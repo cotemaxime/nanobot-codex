@@ -301,7 +301,7 @@ def _make_provider(config: Config):
         try:
             # Prefer Codex SDK path to enable native Codex web search/browsing.
             return CodexSDKProvider(
-                default_model=model,
+                default_model=_normalize_sdk_model_name(model),
                 workspace=str(config.workspace_path),
             )
         except Exception as e:
@@ -332,9 +332,37 @@ def _make_provider(config: Config):
     )
 
 
+def _setup_runtime_file_logging(config: Config) -> None:
+    """Enable persistent runtime logging to file."""
+    from loguru import logger
+
+    log_file = (config.agents.defaults.runtime_log_file or "").strip()
+    if not log_file:
+        return
+    target = Path(log_file).expanduser()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    logger.add(
+        str(target),
+        level=(config.agents.defaults.runtime_log_level or "INFO").upper(),
+        rotation="20 MB",
+        retention=10,
+        enqueue=True,
+        backtrace=False,
+        diagnose=False,
+    )
+
+
 def _is_gpt52_planner_mode(config: Config) -> bool:
     """Return whether planner model is OpenAI Codex GPT-5.2."""
     return (config.agents.defaults.model or "").strip().lower() == "openai-codex/gpt-5.2"
+
+
+def _normalize_sdk_model_name(model: str) -> str:
+    """Normalize model id for Codex SDK (uses raw ids like gpt-5-codex)."""
+    cleaned = (model or "").strip()
+    if cleaned.lower().startswith("openai-codex/"):
+        return cleaned.split("/", 1)[1]
+    return cleaned
 
 
 def _make_codex_worker_provider(config: Config):
@@ -346,11 +374,12 @@ def _make_codex_worker_provider(config: Config):
         return None
 
     worker_cfg = config.agents.codex_worker
-    worker_model = (worker_cfg.model or "").strip() or "openai-codex/gpt-5.3-codex"
+    worker_model = _normalize_sdk_model_name(worker_cfg.model) or "gpt-5.3-codex"
     try:
         return CodexSDKProvider(
             default_model=worker_model,
             workspace=str(config.workspace_path),
+            timeout_seconds=worker_cfg.timeout_seconds,
             sandbox_mode=worker_cfg.sandbox_mode,
             approval_policy=worker_cfg.approval_policy,
             network_access_enabled=worker_cfg.network_access_enabled,
@@ -388,10 +417,13 @@ def gateway(
     console.print(f"{__logo__} Starting nanobot gateway on port {port}...")
     
     config = load_config()
+    _setup_runtime_file_logging(config)
     bus = MessageBus()
     provider = _make_provider(config)
     worker_provider = _make_codex_worker_provider(config)
     spawn_bridge_mode = worker_provider is not None and _is_gpt52_planner_mode(config)
+    worker_fallback_models = config.agents.codex_worker.fallback_models if spawn_bridge_mode else None
+    worker_heartbeat_interval = config.agents.codex_worker.heartbeat_interval_seconds if spawn_bridge_mode else 30
     session_manager = SessionManager(config.workspace_path)
     
     # Create cron service first (callback set after agent creation)
@@ -417,6 +449,8 @@ def gateway(
         disabled_skills=config.agents.disabled_skills,
         subagent_provider=worker_provider,
         spawn_bridge_mode=spawn_bridge_mode,
+        subagent_fallback_models=worker_fallback_models,
+        subagent_heartbeat_interval_seconds=worker_heartbeat_interval,
     )
     
     # Set cron callback (needs agent)
@@ -506,11 +540,14 @@ def agent(
     from loguru import logger
     
     config = load_config()
+    _setup_runtime_file_logging(config)
     
     bus = MessageBus()
     provider = _make_provider(config)
     worker_provider = _make_codex_worker_provider(config)
     spawn_bridge_mode = worker_provider is not None and _is_gpt52_planner_mode(config)
+    worker_fallback_models = config.agents.codex_worker.fallback_models if spawn_bridge_mode else None
+    worker_heartbeat_interval = config.agents.codex_worker.heartbeat_interval_seconds if spawn_bridge_mode else 30
 
     # Create cron service for tool usage (no callback needed for CLI unless running)
     cron_store_path = get_data_dir() / "cron" / "jobs.json"
@@ -538,6 +575,8 @@ def agent(
         disabled_skills=config.agents.disabled_skills,
         subagent_provider=worker_provider,
         spawn_bridge_mode=spawn_bridge_mode,
+        subagent_fallback_models=worker_fallback_models,
+        subagent_heartbeat_interval_seconds=worker_heartbeat_interval,
     )
     
     # Show spinner when logs are off (no output to miss); skip when logs are on

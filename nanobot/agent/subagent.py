@@ -42,6 +42,8 @@ class SubagentManager:
         exec_config: "ExecToolConfig | None" = None,
         restrict_to_workspace: bool = False,
         disabled_skills: list[str] | None = None,
+        fallback_models: list[str] | None = None,
+        heartbeat_interval_seconds: int = 30,
     ):
         from nanobot.config.schema import ExecToolConfig
         self.provider = provider
@@ -58,6 +60,12 @@ class SubagentManager:
             for s in (disabled_skills or [])
             if isinstance(s, str) and s.strip()
         }
+        self.fallback_models = [
+            m.strip()
+            for m in (fallback_models or [])
+            if isinstance(m, str) and m.strip()
+        ]
+        self.heartbeat_interval_seconds = max(5, int(heartbeat_interval_seconds or 30))
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
     
     async def spawn(
@@ -66,6 +74,8 @@ class SubagentManager:
         label: str | None = None,
         origin_channel: str = "cli",
         origin_chat_id: str = "direct",
+        origin_metadata: dict[str, Any] | None = None,
+        origin_session_key: str | None = None,
     ) -> str:
         """
         Spawn a subagent to execute a task in the background.
@@ -85,6 +95,8 @@ class SubagentManager:
         origin = {
             "channel": origin_channel,
             "chat_id": origin_chat_id,
+            "metadata": dict(origin_metadata or {}),
+            "session_key": origin_session_key,
         }
         
         # Create background task
@@ -93,9 +105,13 @@ class SubagentManager:
             self._run_subagent(task_id, task, display_label, origin, started_monotonic)
         )
         self._running_tasks[task_id] = bg_task
+        heartbeat_task = asyncio.create_task(
+            self._heartbeat_loop(task_id, display_label, origin, started_monotonic, bg_task)
+        )
         
         # Cleanup when done
         bg_task.add_done_callback(lambda _: self._running_tasks.pop(task_id, None))
+        bg_task.add_done_callback(lambda _: heartbeat_task.cancel())
 
         logger.info(f"Spawned subagent [{task_id}]: {display_label}")
         await self.bus.publish_outbound(
@@ -103,9 +119,13 @@ class SubagentManager:
                 channel=origin_channel,
                 chat_id=origin_chat_id,
                 content=(
-                    f"Started background task '{display_label}' (id: {task_id}). "
-                    "I will send the final result here when it completes."
+                    f"[progress] Background task '{display_label}' started "
+                    f"(id: {task_id}). I will report progress here."
                 ),
+                metadata={
+                    **dict(origin_metadata or {}),
+                    "progress": True,
+                },
             )
         )
         # Keep a tool result for the orchestrator; user-facing notice is sent above.
@@ -116,7 +136,7 @@ class SubagentManager:
         task_id: str,
         task: str,
         label: str,
-        origin: dict[str, str],
+        origin: dict[str, Any],
         started_monotonic: float,
     ) -> None:
         """Execute the subagent task and announce the result."""
@@ -171,57 +191,76 @@ class SubagentManager:
                 {"role": "user", "content": task},
             ]
             
-            # Run agent loop (limited iterations)
-            max_iterations = 15
-            iteration = 0
+            # Run agent loop (limited iterations) with model fallback support.
             final_result: str | None = None
-            
-            while iteration < max_iterations:
-                iteration += 1
-                
-                response = await self.provider.chat(
-                    messages=messages,
-                    tools=tools.get_definitions(),
-                    model=self.model,
-                    temperature=self.temperature,
-                    max_tokens=self.max_tokens,
-                )
-                
-                if response.has_tool_calls:
-                    # Add assistant message with tool calls
-                    tool_call_dicts = [
-                        {
-                            "id": tc.id,
-                            "type": "function",
-                            "function": {
-                                "name": tc.name,
-                                "arguments": json.dumps(tc.arguments),
-                            },
-                        }
-                        for tc in response.tool_calls
-                    ]
-                    messages.append({
-                        "role": "assistant",
-                        "content": response.content or "",
-                        "tool_calls": tool_call_dicts,
-                    })
-                    
-                    # Execute tools
-                    for tool_call in response.tool_calls:
-                        args_str = json.dumps(tool_call.arguments)
-                        logger.debug(f"Subagent [{task_id}] executing: {tool_call.name} with arguments: {args_str}")
-                        result = await tools.execute(tool_call.name, tool_call.arguments)
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": tool_call.id,
-                            "name": tool_call.name,
-                            "content": result,
+            model_candidates = self._model_candidates()
+            last_model_error = ""
+            for model_name in model_candidates:
+                max_iterations = 15
+                iteration = 0
+                run_messages = list(messages)
+                while iteration < max_iterations:
+                    iteration += 1
+
+                    response = await self.provider.chat(
+                        messages=run_messages,
+                        tools=tools.get_definitions(),
+                        model=model_name,
+                        temperature=self.temperature,
+                        max_tokens=self.max_tokens,
+                    )
+
+                    if (
+                        response.finish_reason == "error"
+                        and self._is_unsupported_model_error(response.content)
+                    ):
+                        last_model_error = response.content or ""
+                        logger.warning(
+                            f"Subagent [{task_id}] worker model unsupported: {model_name}; trying fallback"
+                        )
+                        break
+
+                    if response.has_tool_calls:
+                        # Add assistant message with tool calls
+                        tool_call_dicts = [
+                            {
+                                "id": tc.id,
+                                "type": "function",
+                                "function": {
+                                    "name": tc.name,
+                                    "arguments": json.dumps(tc.arguments),
+                                },
+                            }
+                            for tc in response.tool_calls
+                        ]
+                        run_messages.append({
+                            "role": "assistant",
+                            "content": response.content or "",
+                            "tool_calls": tool_call_dicts,
                         })
-                else:
-                    final_result = response.content
+
+                        # Execute tools
+                        for tool_call in response.tool_calls:
+                            args_str = json.dumps(tool_call.arguments)
+                            logger.debug(f"Subagent [{task_id}] executing: {tool_call.name} with arguments: {args_str}")
+                            result = await tools.execute(tool_call.name, tool_call.arguments)
+                            run_messages.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "name": tool_call.name,
+                                "content": result,
+                            })
+                    else:
+                        final_result = response.content
+                        break
+
+                if final_result is not None:
                     break
+
+            if final_result is None and last_model_error:
+                raise RuntimeError(last_model_error)
             
-            if final_result is None:
+            if not isinstance(final_result, str) or not final_result.strip():
                 final_result = "Task completed but no final response was generated."
             
             logger.info(f"Subagent [{task_id}] completed successfully")
@@ -254,7 +293,7 @@ class SubagentManager:
         label: str,
         task: str,
         result: str,
-        origin: dict[str, str],
+        origin: dict[str, Any],
         status: str,
         elapsed_seconds: float,
     ) -> None:
@@ -281,10 +320,47 @@ Then add one optional next step sentence only if action is still needed."""
             sender_id="subagent",
             chat_id=f"{origin['channel']}:{origin['chat_id']}",
             content=announce_content,
+            metadata={
+                "origin_metadata": origin.get("metadata") or {},
+                "origin_session_key": origin.get("session_key"),
+            },
         )
         
         await self.bus.publish_inbound(msg)
         logger.debug(f"Subagent [{task_id}] announced result to {origin['channel']}:{origin['chat_id']}")
+
+    async def _heartbeat_loop(
+        self,
+        task_id: str,
+        label: str,
+        origin: dict[str, Any],
+        started_monotonic: float,
+        bg_task: asyncio.Task[None],
+    ) -> None:
+        """Emit periodic progress heartbeats while a background task is running."""
+        try:
+            heartbeat_index = 0
+            while not bg_task.done():
+                await asyncio.sleep(self._heartbeat_delay_seconds(heartbeat_index))
+                if bg_task.done():
+                    break
+                elapsed_min = max(1, int((time.monotonic() - started_monotonic) // 60))
+                metadata = dict(origin.get("metadata") or {})
+                metadata["progress"] = True
+                await self.bus.publish_outbound(
+                    OutboundMessage(
+                        channel=origin["channel"],
+                        chat_id=origin["chat_id"],
+                        content=(
+                            f"[progress] Background task '{label}' is still running "
+                            f"(id: {task_id}, ~{elapsed_min} min)."
+                        ),
+                        metadata=metadata,
+                    )
+                )
+                heartbeat_index += 1
+        except asyncio.CancelledError:
+            return
     
     def _build_subagent_prompt(self, task: str) -> str:
         """Build a focused system prompt for the subagent."""
@@ -332,6 +408,34 @@ When you have completed the task, provide a clear summary of your findings or ac
         if provider_name in _CODEX_PROVIDER_CLASS_NAMES:
             return False
         return True
+
+    def _model_candidates(self) -> list[str]:
+        """Get ordered worker model candidates with deduplication."""
+        ordered = [self.model] + self.fallback_models
+        seen: set[str] = set()
+        result: list[str] = []
+        for raw in ordered:
+            name = (raw or "").strip()
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            result.append(name)
+        return result
+
+    @staticmethod
+    def _is_unsupported_model_error(content: str | None) -> bool:
+        text = (content or "").lower()
+        return "model is not supported" in text and "codex" in text
+
+    def _heartbeat_delay_seconds(self, heartbeat_index: int) -> int:
+        """Heartbeat delay schedule: 1m x2, 2m x2, 4m x2, ... cap at 10m."""
+        if heartbeat_index < 0:
+            heartbeat_index = 0
+        stage = heartbeat_index // 2
+        # Stage minutes sequence: 1,2,4,6,8,10,10,...
+        stage_minutes = [1, 2, 4, 6, 8, 10]
+        minutes = stage_minutes[min(stage, len(stage_minutes) - 1)]
+        return max(5, minutes * 60, self.heartbeat_interval_seconds)
     
     def get_running_count(self) -> int:
         """Return the number of currently running subagents."""
