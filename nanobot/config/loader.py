@@ -66,4 +66,18 @@ def _migrate_config(data: dict) -> dict:
     exec_cfg = tools.get("exec", {})
     if "restrictToWorkspace" in exec_cfg and "restrictToWorkspace" not in tools:
         tools["restrictToWorkspace"] = exec_cfg.pop("restrictToWorkspace")
+
+    # Normalize legacy bare Codex model names to openai-codex/<model>.
+    defaults = data.get("agents", {}).get("defaults", {})
+    model = defaults.get("model")
+    if isinstance(model, str):
+        cleaned = model.strip()
+        if (
+            cleaned
+            and not cleaned.startswith("openai-codex/")
+            and "/" not in cleaned
+            and cleaned.startswith("gpt-")
+            and "codex" in cleaned
+        ):
+            defaults["model"] = f"openai-codex/{cleaned}"
     return data

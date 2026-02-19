@@ -18,10 +18,24 @@ class SkillsLoader:
     specific tools or perform certain tasks.
     """
     
-    def __init__(self, workspace: Path, builtin_skills_dir: Path | None = None):
+    def __init__(
+        self,
+        workspace: Path,
+        builtin_skills_dir: Path | None = None,
+        disabled_skills: list[str] | None = None,
+    ):
         self.workspace = workspace
         self.workspace_skills = workspace / "skills"
         self.builtin_skills = builtin_skills_dir or BUILTIN_SKILLS_DIR
+        self.disabled_skills = {
+            s.strip().lower()
+            for s in (disabled_skills or [])
+            if isinstance(s, str) and s.strip()
+        }
+
+    def _is_disabled(self, name: str) -> bool:
+        """Return whether a skill is disabled via configuration."""
+        return name.strip().lower() in self.disabled_skills
     
     def list_skills(self, filter_unavailable: bool = True) -> list[dict[str, str]]:
         """
@@ -39,6 +53,8 @@ class SkillsLoader:
         if self.workspace_skills.exists():
             for skill_dir in self.workspace_skills.iterdir():
                 if skill_dir.is_dir():
+                    if self._is_disabled(skill_dir.name):
+                        continue
                     skill_file = skill_dir / "SKILL.md"
                     if skill_file.exists():
                         skills.append({"name": skill_dir.name, "path": str(skill_file), "source": "workspace"})
@@ -47,6 +63,8 @@ class SkillsLoader:
         if self.builtin_skills and self.builtin_skills.exists():
             for skill_dir in self.builtin_skills.iterdir():
                 if skill_dir.is_dir():
+                    if self._is_disabled(skill_dir.name):
+                        continue
                     skill_file = skill_dir / "SKILL.md"
                     if skill_file.exists() and not any(s["name"] == skill_dir.name for s in skills):
                         skills.append({"name": skill_dir.name, "path": str(skill_file), "source": "builtin"})
@@ -66,6 +84,9 @@ class SkillsLoader:
         Returns:
             Skill content or None if not found.
         """
+        if self._is_disabled(name):
+            return None
+
         # Check workspace first
         workspace_skill = self.workspace_skills / name / "SKILL.md"
         if workspace_skill.exists():

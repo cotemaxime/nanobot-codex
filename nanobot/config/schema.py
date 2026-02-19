@@ -193,6 +193,7 @@ class AgentsConfig(Base):
     """Agent configuration."""
 
     defaults: AgentDefaults = Field(default_factory=AgentDefaults)
+    disabled_skills: list[str] = Field(default_factory=list)
 
 
 class ProviderConfig(Base):
