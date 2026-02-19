@@ -1,7 +1,9 @@
 """Configuration schema using Pydantic."""
 
 from pathlib import Path
-from pydantic import BaseModel, Field, ConfigDict
+from typing import Literal
+
+from pydantic import BaseModel, Field, ConfigDict, field_validator
 from pydantic.alias_generators import to_camel
 from pydantic_settings import BaseSettings
 
@@ -28,6 +30,11 @@ class TelegramConfig(Base):
     token: str = ""  # Bot token from @BotFather
     allow_from: list[str] = Field(default_factory=list)  # Allowed user IDs or usernames
     proxy: str | None = None  # HTTP/SOCKS5 proxy URL, e.g. "http://127.0.0.1:7890" or "socks5://127.0.0.1:1080"
+    tts_enabled: bool = False
+    tts_reply_mode: Literal["off", "voice_input_only", "always"] = "voice_input_only"
+    tts_send_text_also: bool = True
+    tts_voice: str = "alloy"
+    tts_model: str = "gpt-4o-mini-tts"
 
 
 class FeishuConfig(Base):
@@ -200,7 +207,16 @@ class ProviderConfig(Base):
 
     api_key: str = ""
     api_base: str | None = None
+    tts_api_base: str | None = None
     extra_headers: dict[str, str] | None = None  # Custom headers (e.g. APP-Code for AiHubMix)
+
+    @field_validator("tts_api_base", mode="before")
+    @classmethod
+    def _normalize_tts_api_base(cls, value: str | None) -> str | None:
+        if isinstance(value, str):
+            cleaned = value.strip()
+            return cleaned or None
+        return value
 
 
 class ProvidersConfig(Base):

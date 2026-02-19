@@ -150,10 +150,14 @@ class TelegramChannel(BaseChannel):
         config: TelegramConfig,
         bus: MessageBus,
         groq_api_key: str = "",
+        openai_api_key: str = "",
+        openai_tts_api_base: str | None = None,
     ):
         super().__init__(config, bus)
         self.config: TelegramConfig = config
         self.groq_api_key = groq_api_key
+        self.openai_api_key = openai_api_key
+        self.openai_tts_api_base = openai_tts_api_base
         self._app: Application | None = None
         self._chat_ids: dict[str, int] = {}  # Map sender_id to chat_id for replies
         self._typing_tasks: dict[str, asyncio.Task] = {}  # chat_id -> typing loop task
@@ -265,6 +269,10 @@ class TelegramChannel(BaseChannel):
             logger.error(f"Invalid chat_id: {msg.chat_id}")
             return
 
+        # Send synthesized speech reply first when enabled.
+        if msg.content and msg.content != "[empty message]":
+            await self._send_tts_if_needed(msg=msg, chat_id=chat_id, thread_id=thread_id)
+
         # Send media files
         for media_path in (msg.media or []):
             try:
@@ -297,7 +305,16 @@ class TelegramChannel(BaseChannel):
                 )
 
         # Send text content
-        if msg.content and msg.content != "[empty message]":
+        send_text = True
+        if self.config.tts_enabled and not self.config.tts_send_text_also:
+            mode = (self.config.tts_reply_mode or "off").lower()
+            if mode == "always":
+                send_text = False
+            elif mode == "voice_input_only":
+                telegram_meta = (msg.metadata or {}).get("telegram", {})
+                if isinstance(telegram_meta, dict) and bool(telegram_meta.get("voice_input")):
+                    send_text = False
+        if msg.content and msg.content != "[empty message]" and send_text:
             for chunk in _split_message(msg.content):
                 try:
                     html = _markdown_to_telegram_html(chunk)
@@ -471,10 +488,89 @@ class TelegramChannel(BaseChannel):
                 "is_group": message.chat.type != "private",
                 "telegram": {
                     "message_thread_id": message.message_thread_id,
+                    "voice_input": media_type in {"voice", "audio"},
                 },
                 "session_key": f"{self.name}:{str_chat_id}:{message.message_thread_id}" if message.message_thread_id else None,
             }
         )
+
+    def _should_send_tts(self, msg: OutboundMessage) -> tuple[bool, str]:
+        """Determine if this outbound message should include a TTS reply."""
+        if not self.config.tts_enabled:
+            return False, "tts_disabled"
+        if not msg.content or msg.content == "[empty message]":
+            return False, "empty_content"
+        mode = (self.config.tts_reply_mode or "off").lower()
+        if mode == "off":
+            return False, "mode_off"
+        if mode == "always":
+            return True, "mode_always"
+        if mode != "voice_input_only":
+            logger.warning(f"Unknown telegram tts_reply_mode={mode!r}; treating as off")
+            return False, "unknown_mode"
+        telegram_meta = (msg.metadata or {}).get("telegram", {})
+        if not isinstance(telegram_meta, dict):
+            return False, "voice_input_only_missing_metadata"
+        if not bool(telegram_meta.get("voice_input")):
+            return False, "voice_input_only_not_voice_message"
+        return True, "voice_input_only"
+
+    async def _send_tts_if_needed(self, msg: OutboundMessage, chat_id: int, thread_id: int | None) -> None:
+        """Generate and send Telegram voice reply when conditions match."""
+        should_tts, reason = self._should_send_tts(msg)
+        if not should_tts:
+            logger.debug(f"Telegram TTS skipped chat={chat_id} reason={reason}")
+            return
+        logger.info(f"Telegram TTS requested chat={chat_id} reason={reason}")
+
+        from nanobot.providers.tts import OpenAITTSProvider
+
+        tts = OpenAITTSProvider(
+            api_key=self.openai_api_key,
+            api_base=self.openai_tts_api_base,
+            model=self.config.tts_model,
+            voice=self.config.tts_voice,
+        )
+
+        opus_path = await tts.synthesize(msg.content, "opus")
+        if opus_path:
+            try:
+                with open(opus_path, "rb") as f:
+                    sent = await self._app.bot.send_voice(
+                        chat_id=chat_id,
+                        voice=f,
+                        message_thread_id=thread_id,
+                    )
+                    self._remember_message_thread(
+                        chat_id=chat_id,
+                        message_id=getattr(sent, "message_id", None),
+                        thread_id=getattr(sent, "message_thread_id", None) or thread_id,
+                    )
+                    return
+            except Exception as e:
+                logger.warning(f"Telegram TTS Opus send failed chat={chat_id}, falling back to mp3: {e}")
+        else:
+            logger.warning(f"Telegram TTS Opus synthesis failed chat={chat_id}, trying mp3 fallback")
+
+        mp3_path = await tts.synthesize(msg.content, "mp3")
+        if not mp3_path:
+            logger.error(f"Telegram TTS fallback synthesis failed chat={chat_id}")
+            return
+        try:
+            with open(mp3_path, "rb") as f:
+                sent = await self._app.bot.send_audio(
+                    chat_id=chat_id,
+                    audio=f,
+                    message_thread_id=thread_id,
+                )
+                self._remember_message_thread(
+                    chat_id=chat_id,
+                    message_id=getattr(sent, "message_id", None),
+                    thread_id=getattr(sent, "message_thread_id", None) or thread_id,
+                )
+                logger.info(f"Telegram TTS fallback used chat={chat_id} format=mp3")
+        except Exception as e:
+            logger.error(f"Telegram TTS fallback send failed chat={chat_id}: {e}")
 
     @staticmethod
     def _normalize_reaction_item(item: Any) -> str:

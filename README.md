@@ -215,7 +215,17 @@ Connect nanobot to your favorite chat platform.
     "telegram": {
       "enabled": true,
       "token": "YOUR_BOT_TOKEN",
-      "allowFrom": ["YOUR_USER_ID"]
+      "allowFrom": ["YOUR_USER_ID"],
+      "ttsEnabled": true,
+      "ttsReplyMode": "voice_input_only",
+      "ttsSendTextAlso": true,
+      "ttsVoice": "alloy",
+      "ttsModel": "gpt-4o-mini-tts"
+    }
+  },
+  "providers": {
+    "openai": {
+      "apiKey": "YOUR_OPENAI_API_KEY"
     }
   }
 }
@@ -223,6 +233,21 @@ Connect nanobot to your favorite chat platform.
 
 > You can find your **User ID** in Telegram settings. It is shown as `@yourUserId`.
 > Copy this value **without the `@` symbol** and paste it into the config file.
+
+**Telegram voice reply (TTS)**
+
+- Inbound voice/audio is already transcribed to text when `providers.groq.apiKey` is set.
+- Outbound TTS uses OpenAI speech API (`providers.openai.apiKey`).
+- When `ttsReplyMode` is `"voice_input_only"`, the bot sends voice replies only if your input was voice/audio.
+- Telegram delivery tries OGG/Opus voice note first, then falls back to MP3 audio file if needed.
+
+| Setting | Values | Meaning |
+|---|---|---|
+| `channels.telegram.ttsEnabled` | `true`/`false` | Enable speech replies on Telegram |
+| `channels.telegram.ttsReplyMode` | `off`, `voice_input_only`, `always` | Reply with speech never / on voice inputs / on all replies |
+| `channels.telegram.ttsSendTextAlso` | `true`/`false` | Also send normal text reply alongside audio |
+| `channels.telegram.ttsVoice` | OpenAI voice name | Voice style, e.g. `alloy` |
+| `channels.telegram.ttsModel` | OpenAI TTS model | Speech model, default `gpt-4o-mini-tts` |
 
 
 **3. Run**
@@ -609,6 +634,7 @@ Config file: `~/.nanobot/config.json`
 
 > [!TIP]
 > - **Groq** provides free voice transcription via Whisper. If configured, Telegram voice messages will be automatically transcribed.
+> - **OpenAI** powers Telegram text-to-speech replies when `channels.telegram.ttsEnabled` is set to `true`.
 > - **Zhipu Coding Plan**: If you're on Zhipu's coding plan, set `"apiBase": "https://open.bigmodel.cn/api/coding/paas/v4"` in your zhipu provider config.
 > - **MiniMax (Mainland China)**: If your API key is from MiniMax's mainland China platform (minimaxi.com), set `"apiBase": "https://api.minimaxi.com/v1"` in your minimax provider config.
 > - **Codex subscription mode**: Set `"providers": {"codex": {"enabled": true}}` and authenticate with Codex locally first. No OpenAI API key is required in this mode.
