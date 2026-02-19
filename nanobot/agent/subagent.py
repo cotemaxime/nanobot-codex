@@ -18,6 +18,8 @@ from nanobot.agent.tools.filesystem import ReadFileTool, WriteFileTool, EditFile
 from nanobot.agent.tools.shell import ExecTool
 from nanobot.agent.tools.web import WebSearchTool, WebFetchTool
 
+_CODEX_PROVIDER_CLASS_NAMES = {"OpenAICodexProvider", "CodexSDKProvider"}
+
 
 class SubagentManager:
     """
@@ -158,8 +160,9 @@ class SubagentManager:
                 timeout=self.exec_config.timeout,
                 restrict_to_workspace=self.restrict_to_workspace,
             ))
-            tools.register(WebSearchTool(api_key=self.brave_api_key))
-            tools.register(WebFetchTool())
+            if self._should_register_nanobot_web_tools():
+                tools.register(WebSearchTool(api_key=self.brave_api_key))
+                tools.register(WebFetchTool())
             
             # Build messages with subagent-specific prompt
             system_prompt = self._build_subagent_prompt(task)
@@ -319,6 +322,16 @@ Your workspace is at: {self.workspace}
 Skills are available at: {self.workspace}/skills/ (read SKILL.md files as needed)
 
 When you have completed the task, provide a clear summary of your findings or actions."""
+
+    def _should_register_nanobot_web_tools(self) -> bool:
+        """Return whether nanobot web tools should be registered."""
+        model_name = (self.model or "").strip().lower()
+        provider_name = self.provider.__class__.__name__
+        if model_name.startswith("openai-codex/"):
+            return False
+        if provider_name in _CODEX_PROVIDER_CLASS_NAMES:
+            return False
+        return True
     
     def get_running_count(self) -> int:
         """Return the number of currently running subagents."""

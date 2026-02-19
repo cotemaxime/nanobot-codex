@@ -71,6 +71,34 @@ class ReplayProvider(LLMProvider):
         return LLMResponse(content=self.reply)
 
 
+def test_codex_model_does_not_register_nanobot_web_tools(tmp_path):
+    provider = ScriptedProvider(default_model="openai-codex/gpt-5.2")
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=provider,
+        workspace=tmp_path,
+        session_manager=InMemorySessionManager(),
+        model="openai-codex/gpt-5.2",
+    )
+
+    assert not loop.tools.has("web_search")
+    assert not loop.tools.has("web_fetch")
+
+
+def test_non_codex_model_registers_nanobot_web_tools(tmp_path):
+    provider = ScriptedProvider(default_model="anthropic/claude-3-5-haiku")
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=provider,
+        workspace=tmp_path,
+        session_manager=InMemorySessionManager(),
+        model="anthropic/claude-3-5-haiku",
+    )
+
+    assert loop.tools.has("web_search")
+    assert loop.tools.has("web_fetch")
+
+
 @pytest.mark.asyncio
 async def test_agent_loop_standard_response(tmp_path):
     provider = ScriptedProvider(

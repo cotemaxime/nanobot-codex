@@ -28,6 +28,8 @@ from nanobot.agent.memory import MemoryStore
 from nanobot.agent.subagent import SubagentManager
 from nanobot.session.manager import Session, SessionManager
 
+_CODEX_PROVIDER_CLASS_NAMES = {"OpenAICodexProvider", "CodexSDKProvider"}
+
 
 class AgentLoop:
     """
@@ -190,9 +192,10 @@ class AgentLoop:
             restrict_to_workspace=self.restrict_to_workspace,
         ))
         
-        # Web tools
-        self.tools.register(WebSearchTool(api_key=self.brave_api_key))
-        self.tools.register(WebFetchTool())
+        # Web tools: for Codex providers/models, rely on native browsing instead.
+        if self._should_register_nanobot_web_tools():
+            self.tools.register(WebSearchTool(api_key=self.brave_api_key))
+            self.tools.register(WebFetchTool())
         
         # Message tool
         message_tool = MessageTool(
@@ -217,6 +220,16 @@ class AgentLoop:
 
         # Model routing tool (allows agent-driven per-request / per-session model switch)
         self.tools.register(SetModelTool(set_model_callback=self._set_model_from_tool))
+
+    def _should_register_nanobot_web_tools(self) -> bool:
+        """Return whether nanobot web tools should be registered."""
+        model_name = (self.model or "").strip().lower()
+        provider_name = self.provider.__class__.__name__
+        if model_name.startswith("openai-codex/"):
+            return False
+        if provider_name in _CODEX_PROVIDER_CLASS_NAMES:
+            return False
+        return True
     
     async def _connect_mcp(self) -> None:
         """Connect to configured MCP servers (one-time, lazy)."""
