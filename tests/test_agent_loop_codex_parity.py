@@ -119,6 +119,92 @@ async def test_agent_loop_delegated_tool_roundtrip(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_progress_callback_uses_tool_hint_not_model_narration(tmp_path):
+    f = tmp_path / "note.txt"
+    f.write_text("tool output", encoding="utf-8")
+
+    provider = ScriptedProvider(
+        responses=[
+            LLMResponse(
+                content="I'm retrying now and committing everything.",
+                tool_calls=[ToolCallRequest(id="r1", name="read_file", arguments={"path": str(f)})],
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(content="done"),
+        ]
+    )
+
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=provider,
+        workspace=tmp_path,
+        session_manager=InMemorySessionManager(),
+        model="test/default",
+    )
+
+    progress_updates: list[str] = []
+
+    async def _progress(text: str) -> None:
+        progress_updates.append(text)
+
+    response = await loop.process_direct(
+        "read the file",
+        session_key="cli:test-progress",
+        channel="cli",
+        chat_id="test-progress",
+        on_progress=_progress,
+    )
+
+    assert response == "done"
+    assert progress_updates
+    assert progress_updates[0].startswith("Running: read_file(")
+    assert "retrying now" not in progress_updates[0].lower()
+    assert loop.bus.outbound_size == 0
+
+
+@pytest.mark.asyncio
+async def test_default_bus_progress_streams_with_explicit_prefix(tmp_path):
+    f = tmp_path / "note.txt"
+    f.write_text("tool output", encoding="utf-8")
+
+    provider = ScriptedProvider(
+        responses=[
+            LLMResponse(
+                content="Working on it",
+                tool_calls=[ToolCallRequest(id="r1", name="read_file", arguments={"path": str(f)})],
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(content="done"),
+        ]
+    )
+    bus = MessageBus()
+    loop = AgentLoop(
+        bus=bus,
+        provider=provider,
+        workspace=tmp_path,
+        session_manager=InMemorySessionManager(),
+        model="test/default",
+    )
+
+    inbound = InboundMessage(
+        channel="telegram",
+        sender_id="1",
+        chat_id="chat",
+        content="read file",
+        metadata={"telegram": {"message_thread_id": 99}},
+    )
+    response = await loop._process_message(inbound)
+    assert response is not None
+    assert response.content == "done"
+
+    progress = await bus.consume_outbound()
+    assert progress.channel == "telegram"
+    assert progress.chat_id == "chat"
+    assert progress.content.startswith("[progress] Running: read_file(")
+    assert progress.metadata.get("progress") is True
+
+
+@pytest.mark.asyncio
 async def test_agent_loop_does_not_inject_reflection_user_turn(tmp_path):
     f = tmp_path / "note.txt"
     f.write_text("tool output", encoding="utf-8")
@@ -149,6 +235,20 @@ async def test_agent_loop_does_not_inject_reflection_user_turn(tmp_path):
 
     response = await loop.process_direct("read the file", session_key="cli:test-reflect", channel="cli", chat_id="test-reflect")
     assert response == "final"
+
+
+def test_system_prompt_includes_execution_honesty_guardrails(tmp_path):
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=ScriptedProvider(),
+        workspace=tmp_path,
+        session_manager=InMemorySessionManager(),
+        model="test/default",
+    )
+
+    prompt = loop.context.build_system_prompt()
+    assert "Never claim you executed commands" in prompt
+    assert "Use the spawn tool only when the user explicitly asks" in prompt
 
 
 @pytest.mark.asyncio

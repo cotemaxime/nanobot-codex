@@ -159,6 +159,7 @@ class TelegramChannel(BaseChannel):
         self._typing_tasks: dict[str, asyncio.Task] = {}  # chat_id -> typing loop task
         self._reaction_handler_mode: str = "none"  # none | filters | fallback
         self._message_thread_ids: dict[tuple[str, int], int] = {}  # (chat_id, message_id) -> thread_id
+        self._progress_message_ids: dict[tuple[int, int | None], int] = {}  # (chat_id, thread_id) -> message_id
     
     async def start(self) -> None:
         """Start the Telegram bot with long polling."""
@@ -264,6 +265,53 @@ class TelegramChannel(BaseChannel):
         except ValueError:
             logger.error(f"Invalid chat_id: {msg.chat_id}")
             return
+        progress_key = (chat_id, thread_id)
+        is_progress = bool((msg.metadata or {}).get("progress"))
+
+        # Stream progress as a single silent, editable status bubble.
+        if is_progress and msg.content and msg.content != "[empty message]":
+            text = msg.content
+            if text.startswith("[progress]"):
+                text = text[len("[progress]"):].strip()
+            styled = f"⏳ {text or 'Working...'}"
+            html = f"<i>{_markdown_to_telegram_html(styled)}</i>"
+
+            existing_message_id = self._progress_message_ids.get(progress_key)
+            if existing_message_id is not None:
+                try:
+                    await self._app.bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=existing_message_id,
+                        text=html,
+                        parse_mode="HTML",
+                    )
+                    return
+                except Exception:
+                    # Fall back to sending a fresh progress message.
+                    self._progress_message_ids.pop(progress_key, None)
+
+            try:
+                sent = await self._app.bot.send_message(
+                    chat_id=chat_id,
+                    text=html,
+                    parse_mode="HTML",
+                    message_thread_id=thread_id,
+                    disable_notification=True,
+                )
+                mid = getattr(sent, "message_id", None)
+                if isinstance(mid, int):
+                    self._progress_message_ids[progress_key] = mid
+                self._remember_message_thread(
+                    chat_id=chat_id,
+                    message_id=mid,
+                    thread_id=getattr(sent, "message_thread_id", None) or thread_id,
+                )
+            except Exception as e:
+                logger.error(f"Error sending Telegram progress message: {e}")
+            return
+
+        # Non-progress reply: stop reusing prior progress message for this thread.
+        self._progress_message_ids.pop(progress_key, None)
 
         # Send media files
         for media_path in (msg.media or []):

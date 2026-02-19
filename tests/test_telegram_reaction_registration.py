@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.telegram import TelegramChannel
 from nanobot.config.schema import TelegramConfig
@@ -101,3 +102,87 @@ async def test_reaction_metadata_uses_tracked_thread_id():
     assert captured["chat_id"] == "123"
     assert captured["metadata"]["telegram"]["message_thread_id"] == 99
     assert captured["metadata"]["session_key"] == "telegram:123:99"
+
+
+class DummyBot:
+    def __init__(self):
+        self.sent = []
+        self.edited = []
+        self._next_id = 100
+
+    async def send_message(self, **kwargs):
+        self.sent.append(kwargs)
+        msg = SimpleNamespace(message_id=self._next_id, message_thread_id=kwargs.get("message_thread_id"))
+        self._next_id += 1
+        return msg
+
+    async def edit_message_text(self, **kwargs):
+        self.edited.append(kwargs)
+        return SimpleNamespace(message_id=kwargs.get("message_id"))
+
+
+@pytest.mark.asyncio
+async def test_progress_messages_are_silent_and_styled():
+    channel = TelegramChannel(config=TelegramConfig(), bus=MessageBus())
+    channel._app = SimpleNamespace(bot=DummyBot())
+
+    await channel.send(OutboundMessage(
+        channel="telegram",
+        chat_id="123",
+        content='[progress] Running: read_file("todo.txt")',
+        metadata={"progress": True, "telegram": {"message_thread_id": 99}},
+    ))
+
+    assert len(channel._app.bot.sent) == 1
+    call = channel._app.bot.sent[0]
+    assert call["disable_notification"] is True
+    assert call["parse_mode"] == "HTML"
+    assert call["text"].startswith("<i>⏳ Running: read_file")
+    assert channel._progress_message_ids[(123, 99)] == 100
+
+
+@pytest.mark.asyncio
+async def test_progress_messages_edit_single_status_bubble():
+    channel = TelegramChannel(config=TelegramConfig(), bus=MessageBus())
+    channel._app = SimpleNamespace(bot=DummyBot())
+
+    first = OutboundMessage(
+        channel="telegram",
+        chat_id="123",
+        content='[progress] Running: read_file("todo.txt")',
+        metadata={"progress": True, "telegram": {"message_thread_id": 99}},
+    )
+    second = OutboundMessage(
+        channel="telegram",
+        chat_id="123",
+        content='[progress] Running: exec("git status")',
+        metadata={"progress": True, "telegram": {"message_thread_id": 99}},
+    )
+    await channel.send(first)
+    await channel.send(second)
+
+    assert len(channel._app.bot.sent) == 1
+    assert len(channel._app.bot.edited) == 1
+    assert channel._app.bot.edited[0]["message_id"] == 100
+    assert "⏳ Running: exec" in channel._app.bot.edited[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_normal_reply_clears_progress_tracking():
+    channel = TelegramChannel(config=TelegramConfig(), bus=MessageBus())
+    channel._app = SimpleNamespace(bot=DummyBot())
+
+    await channel.send(OutboundMessage(
+        channel="telegram",
+        chat_id="123",
+        content='[progress] Running: read_file("todo.txt")',
+        metadata={"progress": True, "telegram": {"message_thread_id": 99}},
+    ))
+    await channel.send(OutboundMessage(
+        channel="telegram",
+        chat_id="123",
+        content="Final answer",
+        metadata={"telegram": {"message_thread_id": 99}},
+    ))
+
+    assert (123, 99) not in channel._progress_message_ids

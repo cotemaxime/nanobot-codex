@@ -106,7 +106,10 @@ IMPORTANT: When responding to direct questions or conversations, reply directly 
 Only use the 'message' tool when you need to send a message to a specific chat channel (like WhatsApp).
 For normal conversation, just respond with text - do not call the message tool.
 
-Always be helpful, accurate, and concise. Before calling tools, briefly tell the user what you're about to do (one short sentence in the user's language).
+Always be helpful, accurate, and concise.
+Never claim you executed commands, edits, or external actions unless tool output in this turn confirms it.
+If you plan to use tools, keep wording tentative (for example: "I'll check") and avoid pretending work is already done.
+Use the spawn tool only when the user explicitly asks for background/asynchronous work.
 When remembering something important, write to {workspace_path}/memory/MEMORY.md
 To recall past events, grep {workspace_path}/memory/HISTORY.md"""
     

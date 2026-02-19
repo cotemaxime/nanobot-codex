@@ -2,7 +2,6 @@
 
 import asyncio
 from contextvars import ContextVar, Token
-from contextlib import suppress
 from contextlib import AsyncExitStack
 import json
 import json_repair
@@ -47,9 +46,6 @@ class AgentLoop:
         "openai-codex/gpt-5-codex-mini",
         "openai-codex/gpt-5.2",
     ]
-    PROGRESS_PING_STEP_INTERVAL_S = 120
-    PROGRESS_PING_MAX_INTERVAL_S = 10 * 60
-    PROGRESS_PING_REPEATS_PER_STEP = 2
     REACTION_APPROVE = {"👍", "✅", "☑️", "👌"}
     REACTION_RETRY = {"🔁", "🔄", "⟳"}
     REACTION_REDO = {"♻️", "↩️", "↪️"}
@@ -61,6 +57,22 @@ class AgentLoop:
             if any(token == c or token.startswith(c) for c in candidates):
                 return True
         return False
+
+    @staticmethod
+    def _normalize_model_name(model: str | None) -> str | None:
+        """Normalize legacy bare Codex names to openai-codex/<model>."""
+        if model is None:
+            return None
+        cleaned = model.strip()
+        if not cleaned:
+            return cleaned
+        if cleaned.startswith("openai-codex/"):
+            return cleaned
+        if "/" in cleaned:
+            return cleaned
+        if cleaned.startswith("gpt-") and "codex" in cleaned:
+            return f"openai-codex/{cleaned}"
+        return cleaned
 
     def __init__(
         self,
@@ -84,7 +96,7 @@ class AgentLoop:
         self.bus = bus
         self.provider = provider
         self.workspace = workspace
-        self.model = model or provider.get_default_model()
+        self.model = self._normalize_model_name(model or provider.get_default_model()) or provider.get_default_model()
         self.max_iterations = max_iterations
         self.temperature = temperature
         self.max_tokens = max_tokens
@@ -253,8 +265,10 @@ class AgentLoop:
 
             if response.has_tool_calls:
                 if on_progress:
-                    clean = self._strip_think(response.content)
-                    await on_progress(clean or self._tool_hint(response.tool_calls))
+                    # Only stream grounded progress derived from actual tool calls.
+                    # Model-authored pre-tool narration can sound like completed work.
+                    hint = self._tool_hint(response.tool_calls)
+                    await on_progress(f"Running: {hint}" if hint else "Running tools...")
 
                 tool_call_dicts = [
                     {
@@ -290,10 +304,10 @@ class AgentLoop:
         """Apply model switch requested via set_model tool."""
         action = (action or "").strip().lower()
         session = self._active_session_ctx.get()
-        current = self._active_model_ctx.get() or self.model
+        current = self._normalize_model_name(self._active_model_ctx.get() or self.model) or self.model
 
         if action == "show":
-            session_model = session.metadata.get("model_override") if session else None
+            session_model = self._normalize_model_name(session.metadata.get("model_override")) if session else None
             if session_model:
                 return f"Current model: {current} (session override: {session_model})"
             return f"Current model: {current} (using default)"
@@ -308,7 +322,8 @@ class AgentLoop:
         if action != "set":
             return "Error: action must be one of: set, show, clear"
 
-        target = (model or "").strip()
+        target = self._normalize_model_name(model)
+        target = (target or "").strip()
         if not target:
             return "Error: model is required when action='set'"
 
@@ -382,10 +397,7 @@ class AgentLoop:
 
     async def _process_inbound_message(self, msg: InboundMessage) -> None:
         """Process one inbound message and publish outbound responses/errors."""
-        ping_task: asyncio.Task | None = None
         try:
-            if msg.channel != "system":
-                ping_task = asyncio.create_task(self._progress_ping_loop(msg))
             response = await self._process_message(msg)
             if response:
                 session_key = self._resolve_session_key(msg, None)
@@ -407,11 +419,6 @@ class AgentLoop:
                 content=f"Sorry, I encountered an error: {str(e)}",
                 metadata=msg.metadata or {},
             ))
-        finally:
-            if ping_task:
-                ping_task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await ping_task
 
     async def _shutdown_session_workers(self) -> None:
         """Cancel and await all active session workers."""
@@ -437,32 +444,6 @@ class AgentLoop:
         self._running = False
         logger.info("Agent loop stopping")
 
-    async def _progress_ping_loop(self, msg: InboundMessage) -> None:
-        """Send periodic progress pings while a request is still running."""
-
-        current_interval = self.PROGRESS_PING_STEP_INTERVAL_S
-        repeats = 0
-
-        while True:
-            await asyncio.sleep(current_interval)
-            await self.bus.publish_outbound(
-                OutboundMessage(
-                    channel=msg.channel,
-                    chat_id=msg.chat_id,
-                    content="Still working on this. I will send the result when it is ready.",
-                    metadata=msg.metadata or {},
-                )
-            )
-
-            repeats += 1
-            if repeats >= self.PROGRESS_PING_REPEATS_PER_STEP:
-                repeats = 0
-                if current_interval < self.PROGRESS_PING_MAX_INTERVAL_S:
-                    current_interval = min(
-                        current_interval + self.PROGRESS_PING_STEP_INTERVAL_S,
-                        self.PROGRESS_PING_MAX_INTERVAL_S,
-                    )
-    
     async def _process_message(
         self,
         msg: InboundMessage,
@@ -475,7 +456,7 @@ class AgentLoop:
         Args:
             msg: The inbound message to process.
             session_key: Override session key (used by process_direct).
-            on_progress: Optional callback for intermediate output (defaults to bus publish).
+            on_progress: Optional callback for intermediate output.
         
         Returns:
             The response message, or None if no response needed.
@@ -572,7 +553,7 @@ class AgentLoop:
             )
         if cmd_base == "/model":
             model_choices = list(self.MODEL_CHOICES)
-            current_model = session.metadata.get("model_override") or self.model
+            current_model = self._normalize_model_name(session.metadata.get("model_override") or self.model) or self.model
             if current_model not in model_choices:
                 model_choices.insert(0, current_model)
             session.metadata["pending_action"] = "set_model"
@@ -645,7 +626,7 @@ class AgentLoop:
                 self.sessions.save(session)
                 return _reply("Model update canceled.")
             if text.lower() == "show":
-                current = session.metadata.get("model_override") or self.model
+                current = self._normalize_model_name(session.metadata.get("model_override") or self.model) or self.model
                 return _reply(f"Current model: {current}")
             if text.lower() in {"clear", "default"}:
                 session.metadata.pop("model_override", None)
@@ -667,6 +648,7 @@ class AgentLoop:
                 else:
                     return _reply(f"Invalid model number: {text}. Please choose 1-{len(model_choices)}.")
 
+            selected = self._normalize_model_name(selected) or selected
             session.metadata["model_override"] = selected
             session.metadata.pop("pending_action", None)
             session.metadata.pop("pending_model_choices", None)
@@ -677,18 +659,22 @@ class AgentLoop:
             asyncio.create_task(self._consolidate_memory(session))
 
         active_skills = session.metadata.get("active_skills")
-        model_for_session = session.metadata.get("model_override") or self.model
-
-        async def _bus_progress(content: str) -> None:
-            await self.bus.publish_outbound(OutboundMessage(
-                channel=msg.channel, chat_id=msg.chat_id, content=content,
-                metadata=msg.metadata or {},
-            ))
+        model_for_session = self._normalize_model_name(session.metadata.get("model_override") or self.model) or self.model
 
         session_token: Token = self._active_session_ctx.set(session)
         model_token: Token = self._active_model_ctx.set(model_for_session)
         route_token: Token = self._active_route_ctx.set((msg.channel, msg.chat_id))
         try:
+            async def _bus_progress(content: str) -> None:
+                metadata = dict(msg.metadata or {})
+                metadata["progress"] = True
+                await self.bus.publish_outbound(OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=f"[progress] {content}",
+                    metadata=metadata,
+                ))
+
             initial_messages = self.context.build_messages(
                 history=session.get_history(max_messages=self.memory_window),
                 current_message=msg.content,
@@ -864,7 +850,7 @@ class AgentLoop:
         
         session_key = f"{origin_channel}:{origin_chat_id}"
         session = self.sessions.get_or_create(session_key)
-        model_for_session = session.metadata.get("model_override") or self.model
+        model_for_session = self._normalize_model_name(session.metadata.get("model_override") or self.model) or self.model
         session_token: Token = self._active_session_ctx.set(session)
         model_token: Token = self._active_model_ctx.set(model_for_session)
         route_token: Token = self._active_route_ctx.set((origin_channel, origin_chat_id))
