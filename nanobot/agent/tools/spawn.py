@@ -49,8 +49,9 @@ class SpawnTool(Tool):
     def description(self) -> str:
         return (
             "Spawn a subagent to handle a task in the background. "
-            "Use this for complex or time-consuming tasks that can run independently. "
-            "The subagent will complete the task and report back when done."
+            "Use this for any external or tool-heavy task (web research, shell commands, file edits, multi-step work). "
+            "In planner mode, this is the primary execution path. "
+            "The subagent has broader execution capabilities and reports back when done."
         )
     
     @property

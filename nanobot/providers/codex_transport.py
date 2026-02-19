@@ -7,6 +7,7 @@ changes are localized here.
 from __future__ import annotations
 
 import asyncio
+import importlib
 import inspect
 import json
 import os
@@ -52,6 +53,7 @@ class CodexTransport:
         approval_policy: str = "never",
         network_access_enabled: bool = True,
         web_search_enabled: bool = True,
+        stream_reader_limit_bytes: int = 4 * 1024 * 1024,
     ):
         self.profile = profile
         self.workspace = str(Path(workspace).expanduser().resolve()) if workspace else None
@@ -62,6 +64,7 @@ class CodexTransport:
         self.approval_policy = approval_policy
         self.network_access_enabled = network_access_enabled
         self.web_search_enabled = web_search_enabled
+        self.stream_reader_limit_bytes = max(65536, int(stream_reader_limit_bytes or 65536))
         self._sdk = self._load_sdk()
 
     @staticmethod
@@ -243,11 +246,11 @@ class CodexTransport:
             logger.debug(
                 f"[codex-sdk] official thread.run prompt_chars={len(prompt)} schema_keys={list(output_schema.keys())}"
             )
-        turn = await self._invoke_with_timeout(
-            thread.run,
+        turn = await self._run_thread_with_stream_limit(
+            thread,
             prompt,
-            {"outputSchema": output_schema},
-            timeout_s=timeout_s,
+            output_schema,
+            timeout_s,
         )
 
         usage: dict[str, int] = {}
@@ -318,6 +321,43 @@ class CodexTransport:
         if inspect.isawaitable(result):
             return await asyncio.wait_for(result, timeout=timeout_s)
         return result
+
+    async def _run_thread_with_stream_limit(
+        self,
+        thread: Any,
+        prompt: str,
+        output_schema: dict[str, Any],
+        timeout_s: int,
+    ) -> Any:
+        """Run SDK thread with patched subprocess stream limit to avoid line overrun."""
+        try:
+            sdk_exec = importlib.import_module("openai_codex_sdk.exec")
+            sdk_asyncio = getattr(sdk_exec, "asyncio", None)
+            create_subprocess_exec = getattr(sdk_asyncio, "create_subprocess_exec", None)
+            if not callable(create_subprocess_exec):
+                raise RuntimeError("create_subprocess_exec not patchable")
+        except Exception:
+            return await self._invoke_with_timeout(
+                thread.run,
+                prompt,
+                {"outputSchema": output_schema},
+                timeout_s=timeout_s,
+            )
+
+        async def _patched_create_subprocess_exec(*args: Any, **kwargs: Any):
+            kwargs.setdefault("limit", self.stream_reader_limit_bytes)
+            return await create_subprocess_exec(*args, **kwargs)
+
+        sdk_asyncio.create_subprocess_exec = _patched_create_subprocess_exec
+        try:
+            return await self._invoke_with_timeout(
+                thread.run,
+                prompt,
+                {"outputSchema": output_schema},
+                timeout_s=timeout_s,
+            )
+        finally:
+            sdk_asyncio.create_subprocess_exec = create_subprocess_exec
 
     @staticmethod
     def _build_prompt(messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> str:

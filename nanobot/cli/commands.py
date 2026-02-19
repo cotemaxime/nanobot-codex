@@ -384,6 +384,8 @@ def _make_codex_worker_provider(config: Config):
             approval_policy=worker_cfg.approval_policy,
             network_access_enabled=worker_cfg.network_access_enabled,
             web_search_enabled=worker_cfg.web_search_enabled,
+            stream_reader_limit_bytes=worker_cfg.stream_reader_limit_bytes,
+            diagnostic_logging=worker_cfg.diagnostic_logging,
         )
     except Exception as e:
         logger.warning(f"Codex worker bridge unavailable, continuing without bridge: {e}")

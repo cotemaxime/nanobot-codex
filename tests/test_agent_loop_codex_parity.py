@@ -124,6 +124,47 @@ def test_spawn_bridge_mode_hides_direct_tools_for_planner(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_spawn_bridge_mode_retries_when_first_reply_is_refusal(tmp_path):
+    provider = ScriptedProvider(
+        default_model="openai-codex/gpt-5.2",
+        responses=[
+            LLMResponse(content="I can't browse from this environment."),
+            LLMResponse(
+                content="Delegating now",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="s1",
+                        name="spawn",
+                        arguments={"task": "research quick terminal size", "label": "ghostty-search"},
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(content="Spawned a worker and will report back."),
+        ],
+    )
+
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=provider,
+        workspace=tmp_path,
+        session_manager=InMemorySessionManager(),
+        model="openai-codex/gpt-5.2",
+        spawn_bridge_mode=True,
+        subagent_provider=ReplayProvider("subagent ok"),
+    )
+
+    response = await loop.process_direct(
+        "Please search ghostty docs for quick terminal persistence.",
+        session_key="cli:spawn-retry",
+        channel="cli",
+        chat_id="spawn-retry",
+    )
+
+    assert "Spawned a worker" in response
+
+
+@pytest.mark.asyncio
 async def test_agent_loop_standard_response(tmp_path):
     provider = ScriptedProvider(
         default_model="openai-codex/gpt-5.1-codex",

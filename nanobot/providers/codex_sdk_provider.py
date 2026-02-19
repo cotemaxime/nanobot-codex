@@ -33,6 +33,7 @@ class CodexSDKProvider(LLMProvider):
         approval_policy: str = "never",
         network_access_enabled: bool = True,
         web_search_enabled: bool = True,
+        stream_reader_limit_bytes: int = 4 * 1024 * 1024,
         diagnostic_logging: bool = False,
     ):
         super().__init__(api_key=None, api_base=None)
@@ -53,6 +54,7 @@ class CodexSDKProvider(LLMProvider):
             approval_policy=approval_policy,
             network_access_enabled=network_access_enabled,
             web_search_enabled=web_search_enabled,
+            stream_reader_limit_bytes=stream_reader_limit_bytes,
         )
         self.transport.diagnostic_logging = diagnostic_logging
 

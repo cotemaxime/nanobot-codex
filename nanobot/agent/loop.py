@@ -52,6 +52,23 @@ class AgentLoop:
     REACTION_APPROVE = {"👍", "✅", "☑️", "👌"}
     REACTION_RETRY = {"🔁", "🔄", "⟳"}
     REACTION_REDO = {"♻️", "↩️", "↪️"}
+    PLANNER_REFUSAL_MARKERS = (
+        "i can't",
+        "i cannot",
+        "i can’t",
+        "unable to",
+        "don't have",
+        "do not have",
+        "no access",
+        "can't access",
+        "cannot access",
+        "can't run",
+        "cannot run",
+        "can't browse",
+        "cannot browse",
+        "web search tool",
+        "api key not configured",
+    )
 
     @staticmethod
     def _reaction_matches(tokens: set[str], candidates: set[str]) -> bool:
@@ -254,6 +271,13 @@ class AgentLoop:
         if provider_name in _CODEX_PROVIDER_CLASS_NAMES:
             return False
         return True
+
+    @classmethod
+    def _looks_like_planner_refusal(cls, content: str | None) -> bool:
+        text = (content or "").strip().lower()
+        if not text:
+            return True
+        return any(marker in text for marker in cls.PLANNER_REFUSAL_MARKERS)
     
     async def _connect_mcp(self) -> None:
         """Connect to configured MCP servers (one-time, lazy)."""
@@ -777,8 +801,10 @@ class AgentLoop:
                         "role": "system",
                         "content": (
                             "Execution policy: you are the planner model. "
-                            "For any external work (filesystem, shell, web, scheduling, or multi-step actions), "
-                            "delegate via the spawn tool and do not attempt direct execution."
+                            "For any request that requires external knowledge, web research, filesystem, shell, "
+                            "scheduling, or multi-step execution, you MUST delegate via the spawn tool. "
+                            "Do not claim lack of access; use spawn to execute. "
+                            "Only answer directly without spawn for pure conversational replies that require no tools."
                         ),
                     },
                 )
@@ -787,6 +813,28 @@ class AgentLoop:
                 model=model_for_session,
                 on_progress=on_progress or _bus_progress,
             )
+            if (
+                self.spawn_bridge_mode
+                and not tools_used
+                and self._looks_like_planner_refusal(final_content)
+            ):
+                logger.info("Planner-mode refusal detected; forcing one retry with spawn-first instruction")
+                forced_messages = list(initial_messages)
+                forced_messages.insert(
+                    1,
+                    {
+                        "role": "system",
+                        "content": (
+                            "Retry policy: for this request, call the spawn tool now with a concrete task "
+                            "that executes the user's ask. Do not refuse due to tool access."
+                        ),
+                    },
+                )
+                final_content, tools_used = await self._run_agent_loop(
+                    forced_messages,
+                    model=model_for_session,
+                    on_progress=on_progress or _bus_progress,
+                )
         finally:
             self._active_route_ctx.reset(route_token)
             self._active_model_ctx.reset(model_token)
@@ -960,10 +1008,18 @@ class AgentLoop:
         session_key = origin_session_key or f"{origin_channel}:{origin_chat_id}"
         session = self.sessions.get_or_create(session_key)
         model_for_session = self._normalize_model_name(session.metadata.get("model_override") or self.model) or self.model
+        started = asyncio.get_event_loop().time()
         session_token: Token = self._active_session_ctx.set(session)
         model_token: Token = self._active_model_ctx.set(model_for_session)
         route_token: Token = self._active_route_ctx.set((origin_channel, origin_chat_id))
         try:
+            logger.info(
+                "System callback routing channel={} chat_id={} session_key={} model={}",
+                origin_channel,
+                origin_chat_id,
+                session_key,
+                model_for_session,
+            )
             initial_messages = self.context.build_messages(
                 history=session.get_history(max_messages=self.memory_window),
                 current_message=msg.content,
@@ -975,6 +1031,11 @@ class AgentLoop:
             self._active_route_ctx.reset(route_token)
             self._active_model_ctx.reset(model_token)
             self._active_session_ctx.reset(session_token)
+        logger.info(
+            "System callback completed session_key={} elapsed_ms={}",
+            session_key,
+            int((asyncio.get_event_loop().time() - started) * 1000),
+        )
 
         if final_content is None:
             final_content = "Background task completed."

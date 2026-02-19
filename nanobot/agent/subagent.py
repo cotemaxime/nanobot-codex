@@ -196,6 +196,7 @@ class SubagentManager:
             model_candidates = self._model_candidates()
             last_model_error = ""
             for model_name in model_candidates:
+                logger.info(f"Subagent [{task_id}] using worker model: {model_name}")
                 max_iterations = 15
                 iteration = 0
                 run_messages = list(messages)
@@ -209,14 +210,23 @@ class SubagentManager:
                         temperature=self.temperature,
                         max_tokens=self.max_tokens,
                     )
+                    logger.info(
+                        "Subagent [{}] model={} iter={} finish_reason={} tool_calls={} content_len={}",
+                        task_id,
+                        model_name,
+                        iteration,
+                        response.finish_reason,
+                        len(response.tool_calls),
+                        len(response.content or ""),
+                    )
 
-                    if (
-                        response.finish_reason == "error"
-                        and self._is_unsupported_model_error(response.content)
-                    ):
-                        last_model_error = response.content or ""
+                    if response.finish_reason == "error":
+                        last_model_error = response.content or "Worker provider returned error"
                         logger.warning(
-                            f"Subagent [{task_id}] worker model unsupported: {model_name}; trying fallback"
+                            "Subagent [{}] worker model error on {}: {}; trying fallback",
+                            task_id,
+                            model_name,
+                            (response.content or "").strip()[:200],
                         )
                         break
 
@@ -421,11 +431,6 @@ When you have completed the task, provide a clear summary of your findings or ac
             seen.add(name)
             result.append(name)
         return result
-
-    @staticmethod
-    def _is_unsupported_model_error(content: str | None) -> bool:
-        text = (content or "").lower()
-        return "model is not supported" in text and "codex" in text
 
     def _heartbeat_delay_seconds(self, heartbeat_index: int) -> int:
         """Heartbeat delay schedule: 1m x2, 2m x2, 4m x2, ... cap at 10m."""

@@ -815,6 +815,8 @@ MCP tools are automatically discovered and registered on startup. The LLM can us
 | `agents.codexWorker.model` | `"gpt-5.3-codex"` | Codex SDK worker model used by the planner bridge when planner mode is `openai-codex/gpt-5.2` (SDK model IDs are unprefixed). |
 | `agents.codexWorker.timeoutSeconds` | `600` | Codex SDK worker call timeout for delegated subagent runs. Increase for long web-research tasks. |
 | `agents.codexWorker.heartbeatIntervalSeconds` | `30` | Minimum heartbeat interval floor (seconds) for background tasks; scheduler uses 1m×2, 2m×2, 4m×2, … capped at 10m. |
+| `agents.codexWorker.streamReaderLimitBytes` | `4194304` | SDK subprocess stream buffer limit; increase if Codex emits very long JSON/event lines (`LimitOverrunError`). |
+| `agents.codexWorker.diagnosticLogging` | `false` | Enables verbose Codex SDK transport/provider diagnostic logs for worker runs. |
 | `agents.defaults.runtimeLogFile` | `"~/.nanobot/history/agent.log"` | Persistent runtime log file for gateway/agent runs. |
 | `agents.defaults.runtimeLogLevel` | `"INFO"` | Runtime file log level (`DEBUG`, `INFO`, `WARNING`, etc.). |
 | `channels.*.allowFrom` | `[]` (allow all) | Whitelist of user IDs. Empty = allow everyone; non-empty = only listed users can interact. |

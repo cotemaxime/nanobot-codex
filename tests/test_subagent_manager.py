@@ -33,6 +33,23 @@ class SlowProvider:
         return LLMResponse(content="done")
 
 
+class FallbackProvider:
+    def __init__(self):
+        self.calls = []
+
+    def get_default_model(self) -> str:
+        return "gpt-5.3-codex"
+
+    async def chat(self, messages, tools=None, model=None, max_tokens=4096, temperature=0.7):
+        self.calls.append(model or "")
+        if model == "gpt-5.3-codex":
+            return LLMResponse(
+                content="Error calling Codex: timed out after 600s",
+                finish_reason="error",
+            )
+        return LLMResponse(content="fallback succeeded")
+
+
 def test_subagent_codex_model_does_not_register_nanobot_web_tools(tmp_path):
     manager = SubagentManager(
         provider=FakeProvider(),
@@ -133,3 +150,27 @@ def test_heartbeat_delay_schedule_caps_at_ten_minutes(tmp_path):
     )
     observed = [manager._heartbeat_delay_seconds(i) for i in range(12)]
     assert observed == [60, 60, 120, 120, 240, 240, 360, 360, 480, 480, 600, 600]
+
+
+@pytest.mark.asyncio
+async def test_subagent_retries_fallback_model_on_worker_error(tmp_path):
+    bus = MessageBus()
+    provider = FallbackProvider()
+    manager = SubagentManager(
+        provider=provider,
+        workspace=tmp_path,
+        bus=bus,
+        fallback_models=["gpt-5-codex"],
+    )
+
+    await manager.spawn(
+        task="task",
+        label="Label",
+        origin_channel="telegram",
+        origin_chat_id="chat-1",
+    )
+    _ = await bus.consume_outbound()  # started progress message
+    callback = await asyncio.wait_for(bus.consume_inbound(), timeout=3.0)
+    assert "[Subagent 'Label' completed successfully]" in callback.content
+    assert "fallback succeeded" in callback.content
+    assert provider.calls[:2] == ["gpt-5.3-codex", "gpt-5-codex"]

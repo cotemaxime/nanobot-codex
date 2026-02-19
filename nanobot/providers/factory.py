@@ -36,6 +36,13 @@ def create_provider(config):
             return CodexSDKProvider(
                 default_model=_normalize_sdk_model_name(model),
                 workspace=str(config.workspace_path),
+                stream_reader_limit_bytes=max(
+                    65536,
+                    int(config.agents.codex_worker.stream_reader_limit_bytes or 4 * 1024 * 1024),
+                ),
+                diagnostic_logging=(
+                    str(config.agents.defaults.runtime_log_level or "").upper() == "DEBUG"
+                ),
             )
         except Exception as e:
             logger.warning(

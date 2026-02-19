@@ -151,6 +151,8 @@ def test_make_codex_worker_provider_uses_configured_model(monkeypatch, tmp_path)
     cfg.agents.codex_worker.sandbox_mode = "danger-full-access"
     cfg.agents.codex_worker.approval_policy = "never"
     cfg.agents.codex_worker.timeout_seconds = 600
+    cfg.agents.codex_worker.stream_reader_limit_bytes = 4194304
+    cfg.agents.codex_worker.diagnostic_logging = True
     cfg.agents.codex_worker.network_access_enabled = True
     cfg.agents.codex_worker.web_search_enabled = True
 
@@ -159,5 +161,7 @@ def test_make_codex_worker_provider_uses_configured_model(monkeypatch, tmp_path)
     assert worker is not None
     assert captured["default_model"] == "gpt-5.3-codex"
     assert captured["timeout_seconds"] == 600
+    assert captured["stream_reader_limit_bytes"] == 4194304
+    assert captured["diagnostic_logging"] is True
     assert captured["sandbox_mode"] == "danger-full-access"
     assert captured["approval_policy"] == "never"

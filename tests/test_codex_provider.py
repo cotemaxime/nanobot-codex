@@ -15,6 +15,7 @@ class FakeTransport:
         approval_policy="never",
         network_access_enabled=True,
         web_search_enabled=True,
+        stream_reader_limit_bytes=4 * 1024 * 1024,
     ):
         self.calls = []
         self.responses = []

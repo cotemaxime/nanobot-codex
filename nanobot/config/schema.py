@@ -195,17 +195,13 @@ class CodexWorkerConfig(Base):
     """Codex SDK worker settings for delegated task execution."""
 
     model: str = "gpt-5.3-codex"
-    fallback_models: list[str] = Field(
-        default_factory=lambda: [
-            "gpt-5-codex",
-            "gpt-5.1-codex",
-            "gpt-5-codex-mini",
-        ]
-    )
+    fallback_models: list[str] = Field(default_factory=list)
     sandbox_mode: str = "danger-full-access"
     approval_policy: str = "never"
     timeout_seconds: int = 600
     heartbeat_interval_seconds: int = 30
+    stream_reader_limit_bytes: int = 4194304
+    diagnostic_logging: bool = False
     network_access_enabled: bool = True
     web_search_enabled: bool = True
 
