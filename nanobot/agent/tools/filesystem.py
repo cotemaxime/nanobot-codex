@@ -6,19 +6,65 @@ from typing import Any
 from nanobot.agent.tools.base import Tool
 
 
-def _resolve_path(path: str, allowed_dir: Path | None = None) -> Path:
+def _blocked_skill_name(
+    path: Path,
+    blocked_skill_names: set[str] | None = None,
+    skill_roots: list[Path] | None = None,
+) -> str | None:
+    """Return blocked skill name when path is inside a disabled skill directory."""
+    if not blocked_skill_names or not skill_roots:
+        return None
+
+    blocked = {s.strip().lower() for s in blocked_skill_names if isinstance(s, str) and s.strip()}
+    if not blocked:
+        return None
+
+    for root in skill_roots:
+        root_resolved = Path(root).expanduser().resolve()
+        try:
+            rel = path.relative_to(root_resolved)
+        except ValueError:
+            continue
+        if not rel.parts:
+            continue
+        skill_name = rel.parts[0].strip().lower()
+        if skill_name in blocked:
+            return skill_name
+    return None
+
+
+def _resolve_path(
+    path: str,
+    allowed_dir: Path | None = None,
+    blocked_skill_names: set[str] | None = None,
+    skill_roots: list[Path] | None = None,
+) -> Path:
     """Resolve path and optionally enforce directory restriction."""
     resolved = Path(path).expanduser().resolve()
     if allowed_dir and not str(resolved).startswith(str(allowed_dir.resolve())):
         raise PermissionError(f"Path {path} is outside allowed directory {allowed_dir}")
+    blocked_skill = _blocked_skill_name(
+        resolved,
+        blocked_skill_names=blocked_skill_names,
+        skill_roots=skill_roots,
+    )
+    if blocked_skill:
+        raise PermissionError(f"Access denied: skill '{blocked_skill}' is disabled by configuration")
     return resolved
 
 
 class ReadFileTool(Tool):
     """Tool to read file contents."""
     
-    def __init__(self, allowed_dir: Path | None = None):
+    def __init__(
+        self,
+        allowed_dir: Path | None = None,
+        blocked_skill_names: set[str] | None = None,
+        skill_roots: list[Path] | None = None,
+    ):
         self._allowed_dir = allowed_dir
+        self._blocked_skill_names = blocked_skill_names
+        self._skill_roots = skill_roots
 
     @property
     def name(self) -> str:
@@ -43,7 +89,12 @@ class ReadFileTool(Tool):
     
     async def execute(self, path: str, **kwargs: Any) -> str:
         try:
-            file_path = _resolve_path(path, self._allowed_dir)
+            file_path = _resolve_path(
+                path,
+                self._allowed_dir,
+                blocked_skill_names=self._blocked_skill_names,
+                skill_roots=self._skill_roots,
+            )
             if not file_path.exists():
                 return f"Error: File not found: {path}"
             if not file_path.is_file():
@@ -60,8 +111,15 @@ class ReadFileTool(Tool):
 class WriteFileTool(Tool):
     """Tool to write content to a file."""
     
-    def __init__(self, allowed_dir: Path | None = None):
+    def __init__(
+        self,
+        allowed_dir: Path | None = None,
+        blocked_skill_names: set[str] | None = None,
+        skill_roots: list[Path] | None = None,
+    ):
         self._allowed_dir = allowed_dir
+        self._blocked_skill_names = blocked_skill_names
+        self._skill_roots = skill_roots
 
     @property
     def name(self) -> str:
@@ -90,7 +148,12 @@ class WriteFileTool(Tool):
     
     async def execute(self, path: str, content: str, **kwargs: Any) -> str:
         try:
-            file_path = _resolve_path(path, self._allowed_dir)
+            file_path = _resolve_path(
+                path,
+                self._allowed_dir,
+                blocked_skill_names=self._blocked_skill_names,
+                skill_roots=self._skill_roots,
+            )
             file_path.parent.mkdir(parents=True, exist_ok=True)
             file_path.write_text(content, encoding="utf-8")
             return f"Successfully wrote {len(content)} bytes to {path}"
@@ -103,8 +166,15 @@ class WriteFileTool(Tool):
 class EditFileTool(Tool):
     """Tool to edit a file by replacing text."""
     
-    def __init__(self, allowed_dir: Path | None = None):
+    def __init__(
+        self,
+        allowed_dir: Path | None = None,
+        blocked_skill_names: set[str] | None = None,
+        skill_roots: list[Path] | None = None,
+    ):
         self._allowed_dir = allowed_dir
+        self._blocked_skill_names = blocked_skill_names
+        self._skill_roots = skill_roots
 
     @property
     def name(self) -> str:
@@ -137,7 +207,12 @@ class EditFileTool(Tool):
     
     async def execute(self, path: str, old_text: str, new_text: str, **kwargs: Any) -> str:
         try:
-            file_path = _resolve_path(path, self._allowed_dir)
+            file_path = _resolve_path(
+                path,
+                self._allowed_dir,
+                blocked_skill_names=self._blocked_skill_names,
+                skill_roots=self._skill_roots,
+            )
             if not file_path.exists():
                 return f"Error: File not found: {path}"
             
@@ -164,8 +239,15 @@ class EditFileTool(Tool):
 class ListDirTool(Tool):
     """Tool to list directory contents."""
     
-    def __init__(self, allowed_dir: Path | None = None):
+    def __init__(
+        self,
+        allowed_dir: Path | None = None,
+        blocked_skill_names: set[str] | None = None,
+        skill_roots: list[Path] | None = None,
+    ):
         self._allowed_dir = allowed_dir
+        self._blocked_skill_names = blocked_skill_names
+        self._skill_roots = skill_roots
 
     @property
     def name(self) -> str:
@@ -190,7 +272,12 @@ class ListDirTool(Tool):
     
     async def execute(self, path: str, **kwargs: Any) -> str:
         try:
-            dir_path = _resolve_path(path, self._allowed_dir)
+            dir_path = _resolve_path(
+                path,
+                self._allowed_dir,
+                blocked_skill_names=self._blocked_skill_names,
+                skill_roots=self._skill_roots,
+            )
             if not dir_path.exists():
                 return f"Error: Directory not found: {path}"
             if not dir_path.is_dir():

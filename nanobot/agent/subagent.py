@@ -12,6 +12,7 @@ from loguru import logger
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.providers.base import LLMProvider
+from nanobot.agent.skills import BUILTIN_SKILLS_DIR
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.filesystem import ReadFileTool, WriteFileTool, EditFileTool, ListDirTool
 from nanobot.agent.tools.shell import ExecTool
@@ -38,6 +39,7 @@ class SubagentManager:
         brave_api_key: str | None = None,
         exec_config: "ExecToolConfig | None" = None,
         restrict_to_workspace: bool = False,
+        disabled_skills: list[str] | None = None,
     ):
         from nanobot.config.schema import ExecToolConfig
         self.provider = provider
@@ -49,6 +51,11 @@ class SubagentManager:
         self.brave_api_key = brave_api_key
         self.exec_config = exec_config or ExecToolConfig()
         self.restrict_to_workspace = restrict_to_workspace
+        self.disabled_skills = {
+            s.strip().lower()
+            for s in (disabled_skills or [])
+            if isinstance(s, str) and s.strip()
+        }
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
     
     async def spawn(
@@ -117,10 +124,35 @@ class SubagentManager:
             # Build subagent tools (no message tool, no spawn tool)
             tools = ToolRegistry()
             allowed_dir = self.workspace if self.restrict_to_workspace else None
-            tools.register(ReadFileTool(allowed_dir=allowed_dir))
-            tools.register(WriteFileTool(allowed_dir=allowed_dir))
-            tools.register(EditFileTool(allowed_dir=allowed_dir))
-            tools.register(ListDirTool(allowed_dir=allowed_dir))
+            skill_roots = [self.workspace / "skills", BUILTIN_SKILLS_DIR]
+            tools.register(
+                ReadFileTool(
+                    allowed_dir=allowed_dir,
+                    blocked_skill_names=self.disabled_skills,
+                    skill_roots=skill_roots,
+                )
+            )
+            tools.register(
+                WriteFileTool(
+                    allowed_dir=allowed_dir,
+                    blocked_skill_names=self.disabled_skills,
+                    skill_roots=skill_roots,
+                )
+            )
+            tools.register(
+                EditFileTool(
+                    allowed_dir=allowed_dir,
+                    blocked_skill_names=self.disabled_skills,
+                    skill_roots=skill_roots,
+                )
+            )
+            tools.register(
+                ListDirTool(
+                    allowed_dir=allowed_dir,
+                    blocked_skill_names=self.disabled_skills,
+                    skill_roots=skill_roots,
+                )
+            )
             tools.register(ExecTool(
                 working_dir=str(self.workspace),
                 timeout=self.exec_config.timeout,

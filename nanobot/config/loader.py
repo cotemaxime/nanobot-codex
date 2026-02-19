@@ -67,6 +67,22 @@ def _migrate_config(data: dict) -> dict:
     if "restrictToWorkspace" in exec_cfg and "restrictToWorkspace" not in tools:
         tools["restrictToWorkspace"] = exec_cfg.pop("restrictToWorkspace")
 
+    # Move misplaced agents.defaults.disabledSkills → agents.disabledSkills
+    agents = data.get("agents", {})
+    defaults = agents.get("defaults", {}) if isinstance(agents, dict) else {}
+    legacy_disabled = None
+    if isinstance(defaults, dict):
+        legacy_disabled = defaults.pop("disabledSkills", None)
+        if legacy_disabled is None:
+            legacy_disabled = defaults.pop("disabled_skills", None)
+    if (
+        legacy_disabled is not None
+        and isinstance(agents, dict)
+        and "disabledSkills" not in agents
+        and "disabled_skills" not in agents
+    ):
+        agents["disabledSkills"] = legacy_disabled
+
     # Normalize legacy bare Codex model names to openai-codex/<model>.
     defaults = data.get("agents", {}).get("defaults", {})
     model = defaults.get("model")

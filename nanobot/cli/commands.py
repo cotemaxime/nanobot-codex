@@ -900,6 +900,8 @@ def status():
         from nanobot.providers.registry import PROVIDERS
 
         console.print(f"Model: {config.agents.defaults.model}")
+        disabled = ", ".join(config.agents.disabled_skills) if config.agents.disabled_skills else "(none)"
+        console.print(f"Disabled skills: {disabled}")
 
         # Check API keys from registry
         for spec in PROVIDERS:
