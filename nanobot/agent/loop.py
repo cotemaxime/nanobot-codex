@@ -45,6 +45,7 @@ class AgentLoop:
         "openai-codex/gpt-5.1-codex",
         "openai-codex/gpt-5-codex",
         "openai-codex/gpt-5-codex-mini",
+        "openai-codex/gpt-5.2",
     ]
     PROGRESS_PING_STEP_INTERVAL_S = 120
     PROGRESS_PING_MAX_INTERVAL_S = 10 * 60
