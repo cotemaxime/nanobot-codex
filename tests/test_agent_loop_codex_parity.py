@@ -99,6 +99,30 @@ def test_non_codex_model_registers_nanobot_web_tools(tmp_path):
     assert loop.tools.has("web_fetch")
 
 
+def test_spawn_bridge_mode_hides_direct_tools_for_planner(tmp_path):
+    provider = ScriptedProvider(default_model="openai-codex/gpt-5.2")
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=provider,
+        workspace=tmp_path,
+        session_manager=InMemorySessionManager(),
+        model="openai-codex/gpt-5.2",
+        spawn_bridge_mode=True,
+    )
+
+    assert loop.tools.has("spawn")
+    assert loop.tools.has("message")
+    assert loop.tools.has("set_model")
+    assert not loop.tools.has("read_file")
+    assert not loop.tools.has("write_file")
+    assert not loop.tools.has("edit_file")
+    assert not loop.tools.has("list_dir")
+    assert not loop.tools.has("exec")
+    assert not loop.tools.has("web_search")
+    assert not loop.tools.has("web_fetch")
+    assert not loop.tools.has("cron")
+
+
 @pytest.mark.asyncio
 async def test_agent_loop_standard_response(tmp_path):
     provider = ScriptedProvider(

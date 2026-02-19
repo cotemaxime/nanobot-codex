@@ -189,11 +189,22 @@ class AgentDefaults(Base):
     memory_window: int = 50
 
 
+class CodexWorkerConfig(Base):
+    """Codex SDK worker settings for delegated task execution."""
+
+    model: str = "openai-codex/gpt-5.3-codex"
+    sandbox_mode: str = "danger-full-access"
+    approval_policy: str = "never"
+    network_access_enabled: bool = True
+    web_search_enabled: bool = True
+
+
 class AgentsConfig(Base):
     """Agent configuration."""
 
     defaults: AgentDefaults = Field(default_factory=AgentDefaults)
     disabled_skills: list[str] = Field(default_factory=list)
+    codex_worker: CodexWorkerConfig = Field(default_factory=CodexWorkerConfig)
 
 
 class ProviderConfig(Base):

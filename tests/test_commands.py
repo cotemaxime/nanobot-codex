@@ -7,7 +7,7 @@ from typer.testing import CliRunner
 import pytest
 from click.exceptions import Exit
 
-from nanobot.cli.commands import _make_provider, app
+from nanobot.cli.commands import _is_gpt52_planner_mode, _make_codex_worker_provider, _make_provider, app
 from nanobot.config.schema import Config
 
 runner = CliRunner()
@@ -124,3 +124,38 @@ def test_make_provider_surfaces_provider_creation_error(monkeypatch):
 
     with pytest.raises(RuntimeError, match="provider init failed"):
         _make_provider(cfg)
+
+
+def test_is_gpt52_planner_mode():
+    cfg = Config()
+    cfg.agents.defaults.model = "openai-codex/gpt-5.2"
+    assert _is_gpt52_planner_mode(cfg) is True
+
+    cfg.agents.defaults.model = "openai-codex/gpt-5-codex"
+    assert _is_gpt52_planner_mode(cfg) is False
+
+
+def test_make_codex_worker_provider_uses_configured_model(monkeypatch, tmp_path):
+    captured = {}
+
+    class FakeWorker:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr("nanobot.providers.codex_sdk_provider.CodexSDKProvider", FakeWorker)
+
+    cfg = Config()
+    cfg.agents.defaults.model = "openai-codex/gpt-5.2"
+    cfg.agents.defaults.workspace = str(tmp_path)
+    cfg.agents.codex_worker.model = "openai-codex/gpt-5.3-codex"
+    cfg.agents.codex_worker.sandbox_mode = "danger-full-access"
+    cfg.agents.codex_worker.approval_policy = "never"
+    cfg.agents.codex_worker.network_access_enabled = True
+    cfg.agents.codex_worker.web_search_enabled = True
+
+    worker = _make_codex_worker_provider(cfg)
+
+    assert worker is not None
+    assert captured["default_model"] == "openai-codex/gpt-5.3-codex"
+    assert captured["sandbox_mode"] == "danger-full-access"
+    assert captured["approval_policy"] == "never"

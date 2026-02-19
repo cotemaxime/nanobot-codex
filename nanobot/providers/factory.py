@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from loguru import logger
+
 from nanobot.providers.custom_provider import CustomProvider
+from nanobot.providers.codex_sdk_provider import CodexSDKProvider
 from nanobot.providers.litellm_provider import LiteLLMProvider
 from nanobot.providers.openai_codex_provider import OpenAICodexProvider
 
@@ -10,12 +13,28 @@ from nanobot.providers.openai_codex_provider import OpenAICodexProvider
 def create_provider(config):
     """Create an LLM provider from config."""
     model = config.agents.defaults.model
+    model_lower = model.lower()
     provider_name = config.get_provider_name(model)
     p = config.get_provider(model)
 
     # OpenAI Codex (OAuth)
     if provider_name == "openai_codex" or model.startswith("openai-codex/"):
-        return OpenAICodexProvider(default_model=model)
+        # Compatibility: ChatGPT-account Codex SDK does not support gpt-5.2,
+        # but nanobot historically worked with this model via Responses API.
+        if model_lower == "openai-codex/gpt-5.2":
+            return OpenAICodexProvider(default_model=model)
+        try:
+            # Prefer Codex SDK path to enable native Codex web search/browsing.
+            return CodexSDKProvider(
+                default_model=model,
+                workspace=str(config.workspace_path),
+            )
+        except Exception as e:
+            logger.warning(
+                "CodexSDKProvider unavailable; falling back to OpenAICodexProvider: {}",
+                e,
+            )
+            return OpenAICodexProvider(default_model=model)
 
     # Custom: direct OpenAI-compatible endpoint, bypasses LiteLLM
     if provider_name == "custom":

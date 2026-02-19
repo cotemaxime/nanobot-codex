@@ -281,17 +281,32 @@ This file stores important information that should persist across sessions.
 
 def _make_provider(config: Config):
     """Create the appropriate LLM provider from config."""
+    from loguru import logger
     from nanobot.providers.litellm_provider import LiteLLMProvider
+    from nanobot.providers.codex_sdk_provider import CodexSDKProvider
     from nanobot.providers.openai_codex_provider import OpenAICodexProvider
     from nanobot.providers.custom_provider import CustomProvider
 
     model = config.agents.defaults.model
+    model_lower = model.lower()
     provider_name = config.get_provider_name(model)
     p = config.get_provider(model)
 
     # OpenAI Codex (OAuth)
     if provider_name == "openai_codex" or model.startswith("openai-codex/"):
-        return OpenAICodexProvider(default_model=model)
+        # Compatibility: ChatGPT-account Codex SDK does not support gpt-5.2,
+        # but nanobot historically worked with this model via Responses API.
+        if model_lower == "openai-codex/gpt-5.2":
+            return OpenAICodexProvider(default_model=model)
+        try:
+            # Prefer Codex SDK path to enable native Codex web search/browsing.
+            return CodexSDKProvider(
+                default_model=model,
+                workspace=str(config.workspace_path),
+            )
+        except Exception as e:
+            logger.warning(f"Codex SDK unavailable, falling back to OpenAI Codex provider: {e}")
+            return OpenAICodexProvider(default_model=model)
 
     # Custom: direct OpenAI-compatible endpoint, bypasses LiteLLM
     if provider_name == "custom":
@@ -315,6 +330,35 @@ def _make_provider(config: Config):
         extra_headers=p.extra_headers if p else None,
         provider_name=provider_name,
     )
+
+
+def _is_gpt52_planner_mode(config: Config) -> bool:
+    """Return whether planner model is OpenAI Codex GPT-5.2."""
+    return (config.agents.defaults.model or "").strip().lower() == "openai-codex/gpt-5.2"
+
+
+def _make_codex_worker_provider(config: Config):
+    """Create optional Codex SDK worker provider for delegated tasks."""
+    from loguru import logger
+    from nanobot.providers.codex_sdk_provider import CodexSDKProvider
+
+    if not _is_gpt52_planner_mode(config):
+        return None
+
+    worker_cfg = config.agents.codex_worker
+    worker_model = (worker_cfg.model or "").strip() or "openai-codex/gpt-5.3-codex"
+    try:
+        return CodexSDKProvider(
+            default_model=worker_model,
+            workspace=str(config.workspace_path),
+            sandbox_mode=worker_cfg.sandbox_mode,
+            approval_policy=worker_cfg.approval_policy,
+            network_access_enabled=worker_cfg.network_access_enabled,
+            web_search_enabled=worker_cfg.web_search_enabled,
+        )
+    except Exception as e:
+        logger.warning(f"Codex worker bridge unavailable, continuing without bridge: {e}")
+        return None
 
 
 # ============================================================================
@@ -346,6 +390,8 @@ def gateway(
     config = load_config()
     bus = MessageBus()
     provider = _make_provider(config)
+    worker_provider = _make_codex_worker_provider(config)
+    spawn_bridge_mode = worker_provider is not None and _is_gpt52_planner_mode(config)
     session_manager = SessionManager(config.workspace_path)
     
     # Create cron service first (callback set after agent creation)
@@ -369,6 +415,8 @@ def gateway(
         session_manager=session_manager,
         mcp_servers=config.tools.mcp_servers,
         disabled_skills=config.agents.disabled_skills,
+        subagent_provider=worker_provider,
+        spawn_bridge_mode=spawn_bridge_mode,
     )
     
     # Set cron callback (needs agent)
@@ -461,6 +509,8 @@ def agent(
     
     bus = MessageBus()
     provider = _make_provider(config)
+    worker_provider = _make_codex_worker_provider(config)
+    spawn_bridge_mode = worker_provider is not None and _is_gpt52_planner_mode(config)
 
     # Create cron service for tool usage (no callback needed for CLI unless running)
     cron_store_path = get_data_dir() / "cron" / "jobs.json"
@@ -486,6 +536,8 @@ def agent(
         restrict_to_workspace=config.tools.restrict_to_workspace,
         mcp_servers=config.tools.mcp_servers,
         disabled_skills=config.agents.disabled_skills,
+        subagent_provider=worker_provider,
+        spawn_bridge_mode=spawn_bridge_mode,
     )
     
     # Show spinner when logs are off (no output to miss); skip when logs are on

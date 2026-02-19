@@ -94,6 +94,8 @@ class AgentLoop:
         session_manager: SessionManager | None = None,
         mcp_servers: dict | None = None,
         disabled_skills: list[str] | None = None,
+        subagent_provider: LLMProvider | None = None,
+        spawn_bridge_mode: bool = False,
     ):
         from nanobot.config.schema import ExecToolConfig
         from nanobot.cron.service import CronService
@@ -109,6 +111,7 @@ class AgentLoop:
         self.exec_config = exec_config or ExecToolConfig()
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
+        self.spawn_bridge_mode = spawn_bridge_mode
         self.disabled_skills = {
             s.strip().lower()
             for s in (disabled_skills or [])
@@ -119,10 +122,10 @@ class AgentLoop:
         self.sessions = session_manager or SessionManager(workspace)
         self.tools = ToolRegistry()
         self.subagents = SubagentManager(
-            provider=provider,
+            provider=subagent_provider or provider,
             workspace=workspace,
             bus=bus,
-            model=self.model,
+            model=(subagent_provider.get_default_model() if subagent_provider else self.model),
             temperature=self.temperature,
             max_tokens=self.max_tokens,
             brave_api_key=brave_api_key,
@@ -153,6 +156,23 @@ class AgentLoop:
     
     def _register_default_tools(self) -> None:
         """Register the default set of tools."""
+        if self.spawn_bridge_mode:
+            # Planner mode: keep only delegation/user-facing tools.
+            message_tool = MessageTool(
+                send_callback=self.bus.publish_outbound,
+                context_getter=self._get_active_route,
+            )
+            self.tools.register(message_tool)
+
+            spawn_tool = SpawnTool(
+                manager=self.subagents,
+                context_getter=self._get_active_route,
+            )
+            self.tools.register(spawn_tool)
+
+            self.tools.register(SetModelTool(set_model_callback=self._set_model_from_tool))
+            return
+
         # File tools (restrict to workspace if configured)
         allowed_dir = self.workspace if self.restrict_to_workspace else None
         skill_roots = [self.workspace / "skills", BUILTIN_SKILLS_DIR]
@@ -729,6 +749,18 @@ class AgentLoop:
                 channel=msg.channel,
                 chat_id=msg.chat_id,
             )
+            if self.spawn_bridge_mode:
+                initial_messages.insert(
+                    1,
+                    {
+                        "role": "system",
+                        "content": (
+                            "Execution policy: you are the planner model. "
+                            "For any external work (filesystem, shell, web, scheduling, or multi-step actions), "
+                            "delegate via the spawn tool and do not attempt direct execution."
+                        ),
+                    },
+                )
             final_content, tools_used = await self._run_agent_loop(
                 initial_messages,
                 model=model_for_session,
