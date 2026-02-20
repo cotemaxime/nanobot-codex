@@ -130,7 +130,7 @@ def _convert_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _convert_messages(messages: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
-    system_prompt = ""
+    system_parts: list[str] = []
     input_items: list[dict[str, Any]] = []
 
     for idx, msg in enumerate(messages):
@@ -138,7 +138,8 @@ def _convert_messages(messages: list[dict[str, Any]]) -> tuple[str, list[dict[st
         content = msg.get("content")
 
         if role == "system":
-            system_prompt = content if isinstance(content, str) else ""
+            if isinstance(content, str) and content:
+                system_parts.append(content)
             continue
 
         if role == "user":
@@ -186,7 +187,7 @@ def _convert_messages(messages: list[dict[str, Any]]) -> tuple[str, list[dict[st
             )
             continue
 
-    return system_prompt, input_items
+    return "\n\n".join(system_parts), input_items
 
 
 def _convert_user_message(content: Any) -> dict[str, Any]:

@@ -19,7 +19,7 @@ from nanobot.agent.skills import BUILTIN_SKILLS_DIR
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.filesystem import ReadFileTool, WriteFileTool, EditFileTool, ListDirTool
 from nanobot.agent.tools.shell import ExecTool
-from nanobot.agent.tools.web import WebSearchTool, WebFetchTool
+from nanobot.agent.tools.web import CodexWebSearchTool, WebFetchTool, WebSearchTool
 from nanobot.agent.tools.message import MessageTool
 from nanobot.agent.tools.spawn import SpawnTool
 from nanobot.agent.tools.cron import CronTool
@@ -140,6 +140,11 @@ class AgentLoop:
         self.context = ContextBuilder(workspace, disabled_skills=disabled_skills)
         self.sessions = session_manager or SessionManager(workspace)
         self.tools = ToolRegistry()
+        self._web_research_provider = (
+            subagent_provider
+            if subagent_provider and subagent_provider.__class__.__name__ == "CodexSDKProvider"
+            else None
+        )
         self.subagents = SubagentManager(
             provider=subagent_provider or provider,
             workspace=workspace,
@@ -233,10 +238,12 @@ class AgentLoop:
             restrict_to_workspace=self.restrict_to_workspace,
         ))
         
-        # Web tools: for Codex providers/models, rely on native browsing instead.
-        if self._should_register_nanobot_web_tools():
+        # Web tools: route `web_search` through Codex SDK worker when available.
+        if self._web_research_provider is not None:
+            self.tools.register(CodexWebSearchTool(researcher=self._codex_web_search))
+        elif self._should_register_nanobot_web_tools():
             self.tools.register(WebSearchTool(api_key=self.brave_api_key))
-            self.tools.register(WebFetchTool())
+        self.tools.register(WebFetchTool())
         
         # Message tool
         message_tool = MessageTool(
@@ -271,6 +278,40 @@ class AgentLoop:
         if provider_name in _CODEX_PROVIDER_CLASS_NAMES:
             return False
         return True
+
+    async def _codex_web_search(self, query: str, count: int | None = None) -> str:
+        """Run web research through the Codex SDK worker provider."""
+        provider = self._web_research_provider
+        if provider is None:
+            return "Error: Codex web research worker is not configured"
+
+        n = min(max(count or 5, 1), 10)
+        prompt = (
+            f"Research this query on the web: {query}\n\n"
+            f"Return up to {n} concise findings as a numbered list. "
+            "Each finding should include: title, URL, and a short summary."
+        )
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are a web research tool. Use native web browsing/search capabilities and cite URLs."
+                ),
+            },
+            {"role": "user", "content": prompt},
+        ]
+
+        response = await provider.chat(
+            messages=messages,
+            tools=[],
+            model=provider.get_default_model(),
+            temperature=0.2,
+            max_tokens=max(1024, min(self.max_tokens, 4096)),
+        )
+
+        if response.finish_reason == "error":
+            return f"Error: {response.content or 'Codex web research failed'}"
+        return (response.content or "").strip() or "No results."
 
     @classmethod
     def _looks_like_planner_refusal(cls, content: str | None) -> bool:

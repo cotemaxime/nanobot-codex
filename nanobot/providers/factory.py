@@ -2,54 +2,20 @@
 
 from __future__ import annotations
 
-from loguru import logger
-
 from nanobot.providers.custom_provider import CustomProvider
-from nanobot.providers.codex_sdk_provider import CodexSDKProvider
 from nanobot.providers.litellm_provider import LiteLLMProvider
 from nanobot.providers.openai_codex_provider import OpenAICodexProvider
-
-
-def _normalize_sdk_model_name(model: str) -> str:
-    """Normalize model id for Codex SDK (uses raw ids like gpt-5-codex)."""
-    cleaned = (model or "").strip()
-    if cleaned.lower().startswith("openai-codex/"):
-        return cleaned.split("/", 1)[1]
-    return cleaned
 
 
 def create_provider(config):
     """Create an LLM provider from config."""
     model = config.agents.defaults.model
-    model_lower = model.lower()
     provider_name = config.get_provider_name(model)
     p = config.get_provider(model)
 
     # OpenAI Codex (OAuth)
     if provider_name == "openai_codex" or model.startswith("openai-codex/"):
-        # Compatibility: ChatGPT-account Codex SDK does not support gpt-5.2,
-        # but nanobot historically worked with this model via Responses API.
-        if model_lower == "openai-codex/gpt-5.2":
-            return OpenAICodexProvider(default_model=model)
-        try:
-            # Prefer Codex SDK path to enable native Codex web search/browsing.
-            return CodexSDKProvider(
-                default_model=_normalize_sdk_model_name(model),
-                workspace=str(config.workspace_path),
-                stream_reader_limit_bytes=max(
-                    65536,
-                    int(config.agents.codex_worker.stream_reader_limit_bytes or 4 * 1024 * 1024),
-                ),
-                diagnostic_logging=(
-                    str(config.agents.defaults.runtime_log_level or "").upper() == "DEBUG"
-                ),
-            )
-        except Exception as e:
-            logger.warning(
-                "CodexSDKProvider unavailable; falling back to OpenAICodexProvider: {}",
-                e,
-            )
-            return OpenAICodexProvider(default_model=model)
+        return OpenAICodexProvider(default_model=model)
 
     # Custom: direct OpenAI-compatible endpoint, bypasses LiteLLM
     if provider_name == "custom":

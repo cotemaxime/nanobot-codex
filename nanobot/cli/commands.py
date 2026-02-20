@@ -281,32 +281,17 @@ This file stores important information that should persist across sessions.
 
 def _make_provider(config: Config):
     """Create the appropriate LLM provider from config."""
-    from loguru import logger
     from nanobot.providers.litellm_provider import LiteLLMProvider
-    from nanobot.providers.codex_sdk_provider import CodexSDKProvider
     from nanobot.providers.openai_codex_provider import OpenAICodexProvider
     from nanobot.providers.custom_provider import CustomProvider
 
     model = config.agents.defaults.model
-    model_lower = model.lower()
     provider_name = config.get_provider_name(model)
     p = config.get_provider(model)
 
     # OpenAI Codex (OAuth)
     if provider_name == "openai_codex" or model.startswith("openai-codex/"):
-        # Compatibility: ChatGPT-account Codex SDK does not support gpt-5.2,
-        # but nanobot historically worked with this model via Responses API.
-        if model_lower == "openai-codex/gpt-5.2":
-            return OpenAICodexProvider(default_model=model)
-        try:
-            # Prefer Codex SDK path to enable native Codex web search/browsing.
-            return CodexSDKProvider(
-                default_model=_normalize_sdk_model_name(model),
-                workspace=str(config.workspace_path),
-            )
-        except Exception as e:
-            logger.warning(f"Codex SDK unavailable, falling back to OpenAI Codex provider: {e}")
-            return OpenAICodexProvider(default_model=model)
+        return OpenAICodexProvider(default_model=model)
 
     # Custom: direct OpenAI-compatible endpoint, bypasses LiteLLM
     if provider_name == "custom":
@@ -370,7 +355,8 @@ def _make_codex_worker_provider(config: Config):
     from loguru import logger
     from nanobot.providers.codex_sdk_provider import CodexSDKProvider
 
-    if not _is_gpt52_planner_mode(config):
+    model = (config.agents.defaults.model or "").strip().lower()
+    if not model.startswith("openai-codex/"):
         return None
 
     worker_cfg = config.agents.codex_worker
@@ -423,9 +409,13 @@ def gateway(
     bus = MessageBus()
     provider = _make_provider(config)
     worker_provider = _make_codex_worker_provider(config)
-    spawn_bridge_mode = worker_provider is not None and _is_gpt52_planner_mode(config)
-    worker_fallback_models = config.agents.codex_worker.fallback_models if spawn_bridge_mode else None
-    worker_heartbeat_interval = config.agents.codex_worker.heartbeat_interval_seconds if spawn_bridge_mode else 30
+    spawn_bridge_mode = False
+    worker_fallback_models = (
+        config.agents.codex_worker.fallback_models if worker_provider is not None else None
+    )
+    worker_heartbeat_interval = (
+        config.agents.codex_worker.heartbeat_interval_seconds if worker_provider is not None else 30
+    )
     session_manager = SessionManager(config.workspace_path)
     
     # Create cron service first (callback set after agent creation)
@@ -547,9 +537,13 @@ def agent(
     bus = MessageBus()
     provider = _make_provider(config)
     worker_provider = _make_codex_worker_provider(config)
-    spawn_bridge_mode = worker_provider is not None and _is_gpt52_planner_mode(config)
-    worker_fallback_models = config.agents.codex_worker.fallback_models if spawn_bridge_mode else None
-    worker_heartbeat_interval = config.agents.codex_worker.heartbeat_interval_seconds if spawn_bridge_mode else 30
+    spawn_bridge_mode = False
+    worker_fallback_models = (
+        config.agents.codex_worker.fallback_models if worker_provider is not None else None
+    )
+    worker_heartbeat_interval = (
+        config.agents.codex_worker.heartbeat_interval_seconds if worker_provider is not None else 30
+    )
 
     # Create cron service for tool usage (no callback needed for CLI unless running)
     cron_store_path = get_data_dir() / "cron" / "jobs.json"

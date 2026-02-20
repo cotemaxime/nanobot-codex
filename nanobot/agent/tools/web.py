@@ -4,7 +4,7 @@ import html
 import json
 import os
 import re
-from typing import Any
+from typing import Any, Awaitable, Callable
 from urllib.parse import urlparse
 
 import httpx
@@ -86,6 +86,40 @@ class WebSearchTool(Tool):
                 if desc := item.get("description"):
                     lines.append(f"   {desc}")
             return "\n".join(lines)
+        except Exception as e:
+            return f"Error: {e}"
+
+
+class CodexWebSearchTool(Tool):
+    """Search the web via a Codex SDK worker using native research capabilities."""
+
+    name = "web_search"
+    description = "Search the web using Codex native web research."
+    parameters = {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "Search query"},
+            "count": {"type": "integer", "description": "Requested number of findings (1-10)", "minimum": 1, "maximum": 10},
+        },
+        "required": ["query"],
+    }
+
+    def __init__(
+        self,
+        researcher: Callable[[str, int | None], Awaitable[str]],
+        max_results: int = 5,
+    ):
+        self._researcher = researcher
+        self.max_results = max_results
+
+    async def execute(self, query: str, count: int | None = None, **kwargs: Any) -> str:
+        q = (query or "").strip()
+        if not q:
+            return "Error: query is required"
+
+        n = min(max(count or self.max_results, 1), 10)
+        try:
+            return await self._researcher(q, n)
         except Exception as e:
             return f"Error: {e}"
 

@@ -82,7 +82,26 @@ def test_codex_model_does_not_register_nanobot_web_tools(tmp_path):
     )
 
     assert not loop.tools.has("web_search")
-    assert not loop.tools.has("web_fetch")
+    assert loop.tools.has("web_fetch")
+
+
+def test_codex_model_with_worker_registers_codex_web_search_tool(tmp_path):
+    class CodexSDKProvider(ScriptedProvider):
+        pass
+
+    provider = ScriptedProvider(default_model="openai-codex/gpt-5.2")
+    worker = CodexSDKProvider(default_model="gpt-5.3-codex")
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=provider,
+        workspace=tmp_path,
+        session_manager=InMemorySessionManager(),
+        model="openai-codex/gpt-5.2",
+        subagent_provider=worker,
+    )
+
+    assert loop.tools.has("web_search")
+    assert loop.tools.has("web_fetch")
 
 
 def test_non_codex_model_registers_nanobot_web_tools(tmp_path):
