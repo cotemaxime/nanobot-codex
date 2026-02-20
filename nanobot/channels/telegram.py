@@ -394,17 +394,31 @@ class TelegramChannel(BaseChannel):
         sid = str(user.id)
         return f"{sid}|{user.username}" if user.username else sid
 
+    @staticmethod
+    def _resolve_incoming_thread_id(message: Any) -> int | None:
+        """Resolve thread id from Telegram message fields with conservative fallbacks."""
+        thread_id = getattr(message, "message_thread_id", None)
+        if thread_id is None:
+            reply_to = getattr(message, "reply_to_message", None)
+            thread_id = getattr(reply_to, "message_thread_id", None) if reply_to else None
+        if thread_id is None:
+            return None
+        try:
+            return int(thread_id)
+        except (TypeError, ValueError):
+            return None
+
     async def _forward_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Forward slash commands to the bus for unified handling in AgentLoop."""
         if not update.message or not update.effective_user:
             return
-        thread_id = update.message.message_thread_id
+        thread_id = self._resolve_incoming_thread_id(update.message)
         self._remember_message_thread(
             chat_id=update.message.chat_id,
             message_id=update.message.message_id,
             thread_id=thread_id,
         )
-        session_key = f"{self.name}:{update.message.chat_id}:{thread_id}" if thread_id else None
+        session_key = f"{self.name}:{update.message.chat_id}:{thread_id}" if thread_id is not None else None
         await self._handle_message(
             sender_id=self._sender_id(update.effective_user),
             chat_id=str(update.message.chat_id),
@@ -429,10 +443,11 @@ class TelegramChannel(BaseChannel):
         
         # Store chat_id for replies
         self._chat_ids[sender_id] = chat_id
+        thread_id = self._resolve_incoming_thread_id(message)
         self._remember_message_thread(
             chat_id=chat_id,
             message_id=message.message_id,
-            thread_id=message.message_thread_id,
+            thread_id=thread_id,
         )
         
         # Build content from text and/or media
@@ -518,9 +533,9 @@ class TelegramChannel(BaseChannel):
                 "first_name": user.first_name,
                 "is_group": message.chat.type != "private",
                 "telegram": {
-                    "message_thread_id": message.message_thread_id,
+                    "message_thread_id": thread_id,
                 },
-                "session_key": f"{self.name}:{str_chat_id}:{message.message_thread_id}" if message.message_thread_id else None,
+                "session_key": f"{self.name}:{str_chat_id}:{thread_id}" if thread_id is not None else None,
             }
         )
 

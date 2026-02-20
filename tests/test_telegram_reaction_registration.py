@@ -2,10 +2,14 @@ from types import SimpleNamespace
 
 import pytest
 
+from nanobot.agent.loop import AgentLoop
+from nanobot.bus.events import InboundMessage
 from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.telegram import TelegramChannel
 from nanobot.config.schema import TelegramConfig
+from nanobot.providers.base import LLMProvider, LLMResponse
+from nanobot.session.manager import Session
 
 
 class DummyApp:
@@ -20,6 +24,30 @@ def _make_channel():
     channel = TelegramChannel(config=TelegramConfig(), bus=MessageBus())
     channel._app = DummyApp()
     return channel
+
+
+class _InMemorySessionManager:
+    def __init__(self):
+        self._sessions = {}
+
+    def get_or_create(self, key: str):
+        if key not in self._sessions:
+            self._sessions[key] = Session(key=key)
+        return self._sessions[key]
+
+    def save(self, session: Session):
+        self._sessions[session.key] = session
+
+    def invalidate(self, key: str):
+        self._sessions.pop(key, None)
+
+
+class _NoopProvider(LLMProvider):
+    def get_default_model(self) -> str:
+        return "test/default"
+
+    async def chat(self, messages, tools=None, model=None, max_tokens=4096, temperature=0.7):
+        return LLMResponse(content="ok")
 
 
 def test_register_reaction_handlers_uses_filter_constants(monkeypatch):
@@ -104,6 +132,59 @@ async def test_reaction_metadata_uses_tracked_thread_id():
     assert captured["metadata"]["session_key"] == "telegram:123:99"
 
 
+@pytest.mark.asyncio
+async def test_forward_command_uses_reply_thread_when_direct_thread_missing():
+    channel = _make_channel()
+    captured = {}
+
+    async def _capture(**kwargs):
+        captured.update(kwargs)
+
+    channel._handle_message = _capture  # type: ignore[method-assign]
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=7, username="alice"),
+        message=SimpleNamespace(
+            chat_id=123,
+            message_id=55,
+            message_thread_id=None,
+            reply_to_message=SimpleNamespace(message_thread_id=99),
+            text="/model",
+        ),
+    )
+
+    await channel._forward_command(update, None)
+
+    assert captured["chat_id"] == "123"
+    assert captured["metadata"]["telegram"]["message_thread_id"] == 99
+    assert captured["metadata"]["session_key"] == "telegram:123:99"
+
+
+@pytest.mark.asyncio
+async def test_forward_command_keeps_zero_thread_id_in_session_key():
+    channel = _make_channel()
+    captured = {}
+
+    async def _capture(**kwargs):
+        captured.update(kwargs)
+
+    channel._handle_message = _capture  # type: ignore[method-assign]
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=7, username="alice"),
+        message=SimpleNamespace(
+            chat_id=123,
+            message_id=56,
+            message_thread_id=0,
+            reply_to_message=None,
+            text="/help",
+        ),
+    )
+
+    await channel._forward_command(update, None)
+
+    assert captured["metadata"]["telegram"]["message_thread_id"] == 0
+    assert captured["metadata"]["session_key"] == "telegram:123:0"
+
+
 class DummyBot:
     def __init__(self):
         self.sent = []
@@ -119,6 +200,51 @@ class DummyBot:
     async def edit_message_text(self, **kwargs):
         self.edited.append(kwargs)
         return SimpleNamespace(message_id=kwargs.get("message_id"))
+
+
+@pytest.mark.asyncio
+async def test_topic_command_roundtrip_sends_reply_to_same_thread(tmp_path):
+    bus = MessageBus()
+    channel = TelegramChannel(config=TelegramConfig(), bus=bus)
+    channel._app = SimpleNamespace(bot=DummyBot())
+    loop = AgentLoop(
+        bus=bus,
+        provider=_NoopProvider(),
+        workspace=tmp_path,
+        session_manager=_InMemorySessionManager(),
+        model="test/default",
+    )
+
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=7, username="alice"),
+        message=SimpleNamespace(
+            chat_id=123,
+            message_id=57,
+            message_thread_id=99,
+            reply_to_message=None,
+            text="/model",
+        ),
+    )
+
+    await channel._forward_command(update, None)
+    inbound = await bus.consume_inbound()
+
+    assert isinstance(inbound, InboundMessage)
+    assert inbound.metadata.get("telegram", {}).get("message_thread_id") == 99
+    assert inbound.metadata.get("session_key") == "telegram:123:99"
+
+    response = await loop._process_message(inbound)
+
+    assert response is not None
+    assert "Current model for this chat/topic" in response.content
+    assert response.metadata.get("telegram", {}).get("message_thread_id") == 99
+
+    await channel.send(response)
+
+    assert channel._app.bot.sent
+    sent = channel._app.bot.sent[-1]
+    assert sent["chat_id"] == 123
+    assert sent["message_thread_id"] == 99
 
 
 @pytest.mark.asyncio
