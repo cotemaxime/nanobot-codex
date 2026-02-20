@@ -442,6 +442,42 @@ async def test_agent_can_switch_model_via_set_model_tool(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_process_direct_model_override_applies_to_single_request_only(tmp_path):
+    provider = ScriptedProvider(
+        responses=[
+            lambda _messages, _tools, model: LLMResponse(content=f"first via {model}"),
+            lambda _messages, _tools, model: LLMResponse(content=f"second via {model}"),
+        ],
+    )
+
+    manager = InMemorySessionManager()
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=provider,
+        workspace=tmp_path,
+        session_manager=manager,
+        model="openai-codex/gpt-5-codex-mini",
+    )
+
+    first = await loop.process_direct(
+        "run once",
+        session_key="cli:direct-override",
+        channel="cli",
+        chat_id="direct-override",
+        model_override="openai-codex/gpt-5.1-codex",
+    )
+    assert "first via openai-codex/gpt-5.1-codex" in first
+
+    second = await loop.process_direct(
+        "run again",
+        session_key="cli:direct-override",
+        channel="cli",
+        chat_id="direct-override",
+    )
+    assert "second via openai-codex/gpt-5-codex-mini" in second
+
+
+@pytest.mark.asyncio
 async def test_last_command_resends_previous_assistant_message(tmp_path):
     manager = InMemorySessionManager()
     session = manager.get_or_create("cli:last")

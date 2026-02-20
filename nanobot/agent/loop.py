@@ -595,6 +595,7 @@ class AgentLoop:
         msg: InboundMessage,
         session_key: str | None = None,
         on_progress: Callable[[str], Awaitable[None]] | None = None,
+        forced_model: str | None = None,
     ) -> OutboundMessage | None:
         """
         Process a single inbound message.
@@ -603,6 +604,7 @@ class AgentLoop:
             msg: The inbound message to process.
             session_key: Override session key (used by process_direct).
             on_progress: Optional callback for intermediate output.
+            forced_model: Optional model override for this request only.
         
         Returns:
             The response message, or None if no response needed.
@@ -811,7 +813,9 @@ class AgentLoop:
             asyncio.create_task(self._consolidate_memory(session))
 
         active_skills = session.metadata.get("active_skills")
-        model_for_session = self._normalize_model_name(session.metadata.get("model_override") or self.model) or self.model
+        model_for_session = self._normalize_model_name(
+            forced_model or session.metadata.get("model_override") or self.model
+        ) or self.model
 
         session_token: Token = self._active_session_ctx.set(session)
         model_token: Token = self._active_model_ctx.set(model_for_session)
@@ -1200,6 +1204,7 @@ Respond with ONLY valid JSON, no markdown fences."""
         channel: str = "cli",
         chat_id: str = "direct",
         on_progress: Callable[[str], Awaitable[None]] | None = None,
+        model_override: str | None = None,
     ) -> str:
         """
         Process a message directly (for CLI or cron usage).
@@ -1210,6 +1215,7 @@ Respond with ONLY valid JSON, no markdown fences."""
             channel: Source channel (for tool context routing).
             chat_id: Source chat ID (for tool context routing).
             on_progress: Optional callback for intermediate output.
+            model_override: Optional model override for this request only.
         
         Returns:
             The agent's response.
@@ -1222,5 +1228,10 @@ Respond with ONLY valid JSON, no markdown fences."""
             content=content
         )
         
-        response = await self._process_message(msg, session_key=session_key, on_progress=on_progress)
+        response = await self._process_message(
+            msg,
+            session_key=session_key,
+            on_progress=on_progress,
+            forced_model=model_override,
+        )
         return response.content if response else ""

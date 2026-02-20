@@ -854,6 +854,18 @@ nanobot cron list
 nanobot cron remove <job_id>
 ```
 
+Use a different model for cron jobs (optional):
+```json
+{
+  "agents": {
+    "defaults": {
+      "model": "openai-codex/gpt-5.1-codex-mini",
+      "cronModel": "openai-codex/gpt-5.1-codex"
+    }
+  }
+}
+```
+
 </details>
 
 ## 🐳 Docker

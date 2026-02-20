@@ -446,6 +446,8 @@ def gateway(
     )
     
     # Set cron callback (needs agent)
+    cron_model = (config.agents.defaults.cron_model or "").strip() or None
+
     async def on_cron_job(job: CronJob) -> str | None:
         """Execute a cron job through the agent."""
         response = await agent.process_direct(
@@ -453,6 +455,7 @@ def gateway(
             session_key=f"cron:{job.id}",
             channel=job.payload.channel or "cli",
             chat_id=job.payload.to or "direct",
+            model_override=cron_model,
         )
         if job.payload.deliver and job.payload.to:
             from nanobot.bus.events import OutboundMessage
@@ -987,6 +990,8 @@ def status():
         from nanobot.providers.registry import PROVIDERS
 
         console.print(f"Model: {config.agents.defaults.model}")
+        cron_model = (config.agents.defaults.cron_model or "").strip()
+        console.print(f"Cron model: {cron_model if cron_model else '(same as default)'}")
         disabled = ", ".join(config.agents.disabled_skills) if config.agents.disabled_skills else "(none)"
         console.print(f"Disabled skills: {disabled}")
 
