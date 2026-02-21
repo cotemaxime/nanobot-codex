@@ -3,6 +3,7 @@
 import pytest
 from pathlib import Path
 from nanobot.session.manager import Session, SessionManager
+from nanobot.utils.helpers import ensure_dir
 
 # Test constants
 MEMORY_WINDOW = 50
@@ -475,3 +476,47 @@ class TestEmptyAndBoundarySessions:
         expected_count = 60 - KEEP_COUNT - 10
         assert len(old_messages) == expected_count
         assert_messages_content(old_messages, 10, 34)
+
+
+class TestSessionArchiveOnReset:
+    """Test archive rotation for `/new`-style session resets."""
+
+    def _new_local_manager(self, tmp_path: Path) -> SessionManager:
+        manager = SessionManager(Path(tmp_path))
+        manager.sessions_dir = ensure_dir(Path(tmp_path) / "sessions")
+        manager.archives_dir = ensure_dir(manager.sessions_dir / "archives")
+        return manager
+
+    def test_reset_moves_previous_non_empty_session_to_archives(self, tmp_path: Path):
+        manager = self._new_local_manager(tmp_path)
+        session = create_session_with_messages("telegram:chat", 2)
+        manager.save(session)
+
+        session.clear()
+        manager.save(session)
+
+        active = manager._get_session_path("telegram:chat")
+        assert active.exists()
+        assert len([line for line in active.read_text().splitlines() if line.strip()]) == 1
+
+        archived = sorted((manager.sessions_dir / "archives").glob("telegram_chat__*.jsonl"))
+        assert len(archived) == 1
+        archived_lines = [line for line in archived[0].read_text().splitlines() if line.strip()]
+        assert len(archived_lines) == 3  # metadata + 2 messages
+
+    def test_repeated_resets_create_unique_archives(self, tmp_path: Path):
+        manager = self._new_local_manager(tmp_path)
+        session = create_session_with_messages("telegram:chat", 1)
+        manager.save(session)
+        session.clear()
+        manager.save(session)
+
+        session = manager.get_or_create("telegram:chat")
+        session.add_message("user", "another")
+        manager.save(session)
+        session.clear()
+        manager.save(session)
+
+        archived = sorted((manager.sessions_dir / "archives").glob("telegram_chat__*.jsonl"))
+        assert len(archived) == 2
+        assert archived[0].name != archived[1].name

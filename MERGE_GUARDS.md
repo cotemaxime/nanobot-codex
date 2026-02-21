@@ -15,11 +15,13 @@ Use this file as a checklist during each upstream merge.
 
 ### 2) Slash command UX kept in chat loop
 - Feature: command handling remains available from chat flow (`/new`, `/help`, `/last`, `/skills`, `/skill`, `/model`).
+- Feature detail: `/new` rotates the current session JSONL into `~/.nanobot/sessions/archives/` (timestamped filename) before resetting active session history.
 - Covered by:
   - `tests/test_agent_loop_codex_parity.py::test_new_command_with_bot_mention_resets_without_model_call`
   - `tests/test_agent_loop_codex_parity.py::test_last_command_resends_previous_assistant_message`
   - `tests/test_merge_guard_kept_features.py::test_help_command_lists_kept_chat_commands`
   - `tests/test_merge_guard_kept_features.py::test_model_override_is_scoped_by_topic_session_key`
+  - `tests/test_consolidate_offset.py::TestSessionArchiveOnReset::test_reset_moves_previous_non_empty_session_to_archives`
 
 ### 3) Reaction handling workflow (Telegram)
 - Feature: reactions trigger approval/redo/retry behavior.

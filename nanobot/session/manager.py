@@ -1,9 +1,10 @@
 """Session management for conversation history."""
 
 import json
+import shutil
 from pathlib import Path
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from loguru import logger
@@ -75,6 +76,7 @@ class SessionManager:
         except OSError:
             # Sandbox/permissions can block writes under HOME; keep sessions in workspace then.
             self.sessions_dir = ensure_dir(fallback_dir)
+        self.archives_dir = ensure_dir(self.sessions_dir / "archives")
         self.legacy_sessions_dir = Path.home() / ".nanobot" / "sessions"
         self._cache: dict[str, Session] = {}
     
@@ -156,20 +158,67 @@ class SessionManager:
     def save(self, session: Session) -> None:
         """Save a session to disk."""
         path = self._get_session_path(session.key)
+        self._archive_if_reset(path, session)
 
+        self._write_session(path, session)
+
+        self._cache[session.key] = session
+
+    def _write_session(self, path: Path, session: Session) -> None:
+        """Write a session to a given JSONL path."""
         with open(path, "w") as f:
             metadata_line = {
                 "_type": "metadata",
                 "created_at": session.created_at.isoformat(),
                 "updated_at": session.updated_at.isoformat(),
                 "metadata": session.metadata,
-                "last_consolidated": session.last_consolidated
+                "last_consolidated": session.last_consolidated,
             }
             f.write(json.dumps(metadata_line) + "\n")
             for msg in session.messages:
                 f.write(json.dumps(msg) + "\n")
 
-        self._cache[session.key] = session
+    def _file_has_messages(self, path: Path) -> bool:
+        """Return True when a session JSONL has at least one non-metadata message line."""
+        if not path.exists():
+            return False
+        try:
+            with open(path) as f:
+                # First line is metadata. Any non-empty line after that is a message.
+                next(f, None)
+                for line in f:
+                    if line.strip():
+                        return True
+        except OSError:
+            return False
+        return False
+
+    def _build_archive_path(self, key: str) -> Path:
+        """Build a unique timestamped archive path for a session key."""
+        safe_key = safe_filename(key.replace(":", "_"))
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        candidate = self.archives_dir / f"{safe_key}__{stamp}.jsonl"
+        suffix = 1
+        while candidate.exists():
+            candidate = self.archives_dir / f"{safe_key}__{stamp}_{suffix}.jsonl"
+            suffix += 1
+        return candidate
+
+    def _archive_if_reset(self, path: Path, session: Session) -> None:
+        """
+        Archive current on-disk session when a non-empty session is being reset.
+
+        This is primarily used by `/new`: the existing session JSONL is moved to
+        `sessions/archives/` with a timestamped name, then a fresh session file
+        is written at the active path.
+        """
+        if session.messages:
+            return
+        if not self._file_has_messages(path):
+            return
+        archive_path = self._build_archive_path(session.key)
+        shutil.move(str(path), str(archive_path))
+        logger.info(f"Archived session {session.key} to {archive_path}")
     
     def invalidate(self, key: str) -> None:
         """Remove a session from the in-memory cache."""
