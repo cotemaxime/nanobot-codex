@@ -188,6 +188,9 @@ class AgentDefaults(Base):
     temperature: float = 0.7
     max_tool_iterations: int = 20
     memory_window: int = 50
+    context_warning_threshold: float = 0.75
+    model_context_limit_tokens: int = 128000
+    cron_context_limit_tokens: int | None = None
     runtime_log_file: str = "~/.nanobot/history/agent.log"
     runtime_log_level: str = "INFO"
 

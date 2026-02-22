@@ -152,6 +152,7 @@ async def test_help_command_lists_kept_chat_commands(tmp_path):
 
     assert "/new" in result
     assert "/last" in result
+    assert "/compact" in result
     assert "/skills" in result
     assert "/skill" in result
     assert "/model" in result

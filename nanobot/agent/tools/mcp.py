@@ -7,6 +7,7 @@ from loguru import logger
 
 from nanobot.agent.tools.base import Tool
 from nanobot.agent.tools.registry import ToolRegistry
+from nanobot.utils.env import with_nvm_env
 
 
 class MCPToolWrapper(Tool):
@@ -53,8 +54,11 @@ async def connect_mcp_servers(
     for name, cfg in mcp_servers.items():
         try:
             if cfg.command:
+                env = with_nvm_env()
+                if cfg.env:
+                    env.update(cfg.env)
                 params = StdioServerParameters(
-                    command=cfg.command, args=cfg.args, env=cfg.env or None
+                    command=cfg.command, args=cfg.args, env=env
                 )
                 read, write = await stack.enter_async_context(stdio_client(params))
             elif cfg.url:
