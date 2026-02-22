@@ -65,7 +65,7 @@ class SubagentManager:
             for m in (fallback_models or [])
             if isinstance(m, str) and m.strip()
         ]
-        self.heartbeat_interval_seconds = max(5, int(heartbeat_interval_seconds or 30))
+        self.heartbeat_interval_seconds = max(1, int(heartbeat_interval_seconds or 30))
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
     
     async def spawn(
@@ -434,13 +434,16 @@ When you have completed the task, provide a clear summary of your findings or ac
 
     def _heartbeat_delay_seconds(self, heartbeat_index: int) -> int:
         """Heartbeat delay schedule: 1m x2, 2m x2, 4m x2, ... cap at 10m."""
+        # Allow explicit tiny intervals (mainly for tests/debug), otherwise keep staged backoff.
+        if self.heartbeat_interval_seconds <= 5:
+            return self.heartbeat_interval_seconds
         if heartbeat_index < 0:
             heartbeat_index = 0
         stage = heartbeat_index // 2
         # Stage minutes sequence: 1,2,4,6,8,10,10,...
         stage_minutes = [1, 2, 4, 6, 8, 10]
         minutes = stage_minutes[min(stage, len(stage_minutes) - 1)]
-        return max(5, minutes * 60, self.heartbeat_interval_seconds)
+        return max(minutes * 60, self.heartbeat_interval_seconds)
     
     def get_running_count(self) -> int:
         """Return the number of currently running subagents."""

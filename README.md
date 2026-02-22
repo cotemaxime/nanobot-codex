@@ -16,10 +16,14 @@
 
 ⚡️ Delivers core agent functionality in just **~4,000** lines of code — **99% smaller** than Clawdbot's 430k+ lines.
 
-📏 Real-time line count: **3,761 lines** (run `bash core_agent_lines.sh` to verify anytime)
+📏 Real-time line count: **3,862 lines** (run `bash core_agent_lines.sh` to verify anytime)
 
 ## 📢 News
 
+- **2026-02-21** 🎉 Released **v0.1.4.post1** — new providers, media support across channels, and major stability improvements. See [release notes](https://github.com/HKUDS/nanobot/releases/tag/v0.1.4.post1) for details.
+- **2026-02-20** 🐦 Feishu now receives multimodal files from users. More reliable memory under the hood.
+- **2026-02-19** ✨ Slack now sends files, Discord splits long messages, and subagents work in CLI mode.
+- **2026-02-18** ⚡️ nanobot now supports VolcEngine, MCP custom auth headers, and Anthropic prompt caching.
 - **2026-02-17** 🎉 Released **v0.1.4** — MCP support, progress streaming, new providers, and multiple channel improvements. Please see [release notes](https://github.com/HKUDS/nanobot/releases/tag/v0.1.4) for details.
 - **2026-02-16** 🦞 nanobot now integrates a [ClawHub](https://clawhub.ai) skill — search and install public agent skills.
 - **2026-02-15** 🔑 nanobot now supports OpenAI Codex provider with OAuth login support.
@@ -27,13 +31,13 @@
 - **2026-02-13** 🎉 Released **v0.1.3.post7** — includes security hardening and multiple improvements. **Please upgrade to the latest version to address security issues**. See [release notes](https://github.com/HKUDS/nanobot/releases/tag/v0.1.3.post7) for more details.
 - **2026-02-12** 🧠 Redesigned memory system — Less code, more reliable. Join the [discussion](https://github.com/HKUDS/nanobot/discussions/566) about it!
 - **2026-02-11** ✨ Enhanced CLI experience and added MiniMax support!
-- **2026-02-10** 🎉 Released **v0.1.3.post6** with improvements! Check the updates [notes](https://github.com/HKUDS/nanobot/releases/tag/v0.1.3.post6) and our [roadmap](https://github.com/HKUDS/nanobot/discussions/431).
-- **2026-02-09** 💬 Added Slack, Email, and QQ support — nanobot now supports multiple chat platforms!
-- **2026-02-08** 🔧 Refactored Providers—adding a new LLM provider now takes just 2 simple steps! Check [here](#providers).
 
 <details>
 <summary>Earlier news</summary>
 
+- **2026-02-10** 🎉 Released **v0.1.3.post6** with improvements! Check the updates [notes](https://github.com/HKUDS/nanobot/releases/tag/v0.1.3.post6) and our [roadmap](https://github.com/HKUDS/nanobot/discussions/431).
+- **2026-02-09** 💬 Added Slack, Email, and QQ support — nanobot now supports multiple chat platforms!
+- **2026-02-08** 🔧 Refactored Providers—adding a new LLM provider now takes just 2 simple steps! Check [here](#providers).
 - **2026-02-07** 🚀 Released **v0.1.3.post5** with Qwen support & several key improvements! Check [here](https://github.com/HKUDS/nanobot/releases/tag/v0.1.3.post5) for details.
 - **2026-02-06** ✨ Added Moonshot/Kimi provider, Discord integration, and enhanced security hardening!
 - **2026-02-05** ✨ Added Feishu channel, DeepSeek provider, and enhanced scheduled tasks support!
@@ -107,9 +111,8 @@ pip install nanobot-ai
 ## 🚀 Quick Start
 
 > [!TIP]
-> Choose one mode in `~/.nanobot/config.json`:
-> - API-key mode (OpenRouter/OpenAI/etc.)
-> - Codex subscription mode (`providers.codex.enabled=true`, then authenticate with Codex locally)
+> Set your API key in `~/.nanobot/config.json`.
+> Get API keys: [OpenRouter](https://openrouter.ai/keys) (Global) · [Brave Search](https://brave.com/search/api/) (optional, for web search)
 
 **1. Initialize**
 
@@ -138,38 +141,6 @@ Add or merge these **two parts** into your config (other options have defaults).
   "agents": {
     "defaults": {
       "model": "anthropic/claude-opus-4-5"
-    }
-  }
-}
-```
-
-For Codex subscription mode:
-```json
-{
-  "providers": {
-    "codex": {
-      "enabled": true,
-      "sandboxMode": "workspace-write",
-      "approvalPolicy": "never",
-      "diagnosticLogging": true
-    }
-  },
-  "agents": {
-    "defaults": {
-      "model": "codex/default"
-    }
-  }
-}
-```
-
-For standalone VPS "full YOLO" mode (dangerous, no sandbox):
-```json
-{
-  "providers": {
-    "codex": {
-      "enabled": true,
-      "sandboxMode": "danger-full-access",
-      "approvalPolicy": "never"
     }
   }
 }
@@ -611,7 +582,7 @@ Config file: `~/.nanobot/config.json`
 > - **Groq** provides free voice transcription via Whisper. If configured, Telegram voice messages will be automatically transcribed.
 > - **Zhipu Coding Plan**: If you're on Zhipu's coding plan, set `"apiBase": "https://open.bigmodel.cn/api/coding/paas/v4"` in your zhipu provider config.
 > - **MiniMax (Mainland China)**: If your API key is from MiniMax's mainland China platform (minimaxi.com), set `"apiBase": "https://api.minimaxi.com/v1"` in your minimax provider config.
-> - **Codex subscription mode**: Set `"providers": {"codex": {"enabled": true}}` and authenticate with Codex locally first. No OpenAI API key is required in this mode.
+> - **VolcEngine Coding Plan**: If you're on VolcEngine's coding plan, set `"apiBase": "https://ark.cn-beijing.volces.com/api/coding/v3"` in your volcengine provider config.
 
 | Provider | Purpose | Get API Key |
 |----------|---------|-------------|
@@ -622,9 +593,10 @@ Config file: `~/.nanobot/config.json`
 | `deepseek` | LLM (DeepSeek direct) | [platform.deepseek.com](https://platform.deepseek.com) |
 | `groq` | LLM + **Voice transcription** (Whisper) | [console.groq.com](https://console.groq.com) |
 | `gemini` | LLM (Gemini direct) | [aistudio.google.com](https://aistudio.google.com) |
-| `minimax` | LLM (MiniMax direct) | [platform.minimax.io](https://platform.minimax.io) |
+| `minimax` | LLM (MiniMax direct) | [platform.minimaxi.com](https://platform.minimaxi.com) |
 | `aihubmix` | LLM (API gateway, access to all models) | [aihubmix.com](https://aihubmix.com) |
-| `siliconflow` | LLM (SiliconFlow/硅基流动, API gateway) | [siliconflow.cn](https://siliconflow.cn) |
+| `siliconflow` | LLM (SiliconFlow/硅基流动) | [siliconflow.cn](https://siliconflow.cn) |
+| `volcengine` | LLM (VolcEngine/火山引擎) | [volcengine.com](https://www.volcengine.com) |
 | `dashscope` | LLM (Qwen) | [dashscope.console.aliyun.com](https://dashscope.console.aliyun.com) |
 | `moonshot` | LLM (Moonshot/Kimi) | [platform.moonshot.cn](https://platform.moonshot.cn) |
 | `zhipu` | LLM (Zhipu GLM) | [open.bigmodel.cn](https://open.bigmodel.cn) |
@@ -785,6 +757,12 @@ Add MCP servers to your `config.json`:
       "filesystem": {
         "command": "npx",
         "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/dir"]
+      },
+      "my-remote-mcp": {
+        "url": "https://example.com/mcp/",
+        "headers": {
+          "Authorization": "Bearer xxxxx"
+        }
       }
     }
   }
@@ -796,7 +774,22 @@ Two transport modes are supported:
 | Mode | Config | Example |
 |------|--------|---------|
 | **Stdio** | `command` + `args` | Local process via `npx` / `uvx` |
-| **HTTP** | `url` | Remote endpoint (`https://mcp.example.com/sse`) |
+| **HTTP** | `url` + `headers` (optional) | Remote endpoint (`https://mcp.example.com/sse`) |
+
+Use `toolTimeout` to override the default 30s per-call timeout for slow servers:
+
+```json
+{
+  "tools": {
+    "mcpServers": {
+      "my-slow-server": {
+        "url": "https://example.com/mcp/",
+        "toolTimeout": 120
+      }
+    }
+  }
+}
+```
 
 MCP tools are automatically discovered and registered on startup. The LLM can use them alongside built-in tools — no extra configuration needed.
 
@@ -811,14 +804,6 @@ MCP tools are automatically discovered and registered on startup. The LLM can us
 | Option | Default | Description |
 |--------|---------|-------------|
 | `tools.restrictToWorkspace` | `false` | When `true`, restricts **all** agent tools (shell, file read/write/edit, list) to the workspace directory. Prevents path traversal and out-of-scope access. |
-| `agents.disabledSkills` | `[]` | Disable specific skills globally by name (case-insensitive), e.g. `["clawhub"]`. Disabled skills are hidden and cannot be loaded. |
-| `agents.codexWorker.model` | `"gpt-5.3-codex"` | Codex SDK worker model used by the planner bridge when planner mode is `openai-codex/gpt-5.2` (SDK model IDs are unprefixed). |
-| `agents.codexWorker.timeoutSeconds` | `600` | Codex SDK worker call timeout for delegated subagent runs. Increase for long web-research tasks. |
-| `agents.codexWorker.heartbeatIntervalSeconds` | `30` | Minimum heartbeat interval floor (seconds) for background tasks; scheduler uses 1m×2, 2m×2, 4m×2, … capped at 10m. |
-| `agents.codexWorker.streamReaderLimitBytes` | `4194304` | SDK subprocess stream buffer limit; increase if Codex emits very long JSON/event lines (`LimitOverrunError`). |
-| `agents.codexWorker.diagnosticLogging` | `false` | Enables verbose Codex SDK transport/provider diagnostic logs for worker runs. |
-| `agents.defaults.runtimeLogFile` | `"~/.nanobot/history/agent.log"` | Persistent runtime log file for gateway/agent runs. |
-| `agents.defaults.runtimeLogLevel` | `"INFO"` | Runtime file log level (`DEBUG`, `INFO`, `WARNING`, etc.). |
 | `channels.*.allowFrom` | `[]` (allow all) | Whitelist of user IDs. Empty = allow everyone; non-empty = only listed users can interact. |
 
 
@@ -852,18 +837,6 @@ nanobot cron list
 
 # Remove a job
 nanobot cron remove <job_id>
-```
-
-Use a different model for cron jobs (optional):
-```json
-{
-  "agents": {
-    "defaults": {
-      "model": "openai-codex/gpt-5.1-codex-mini",
-      "cronModel": "openai-codex/gpt-5.1-codex"
-    }
-  }
-}
 ```
 
 </details>
@@ -907,6 +880,59 @@ docker run -v ~/.nanobot:/root/.nanobot --rm nanobot agent -m "Hello!"
 docker run -v ~/.nanobot:/root/.nanobot --rm nanobot status
 ```
 
+## 🐧 Linux Service
+
+Run the gateway as a systemd user service so it starts automatically and restarts on failure.
+
+**1. Find the nanobot binary path:**
+
+```bash
+which nanobot   # e.g. /home/user/.local/bin/nanobot
+```
+
+**2. Create the service file** at `~/.config/systemd/user/nanobot-gateway.service` (replace `ExecStart` path if needed):
+
+```ini
+[Unit]
+Description=Nanobot Gateway
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/nanobot gateway
+Restart=always
+RestartSec=10
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=%h
+
+[Install]
+WantedBy=default.target
+```
+
+**3. Enable and start:**
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now nanobot-gateway
+```
+
+**Common operations:**
+
+```bash
+systemctl --user status nanobot-gateway        # check status
+systemctl --user restart nanobot-gateway       # restart after config changes
+journalctl --user -u nanobot-gateway -f        # follow logs
+```
+
+If you edit the `.service` file itself, run `systemctl --user daemon-reload` before restarting.
+
+> **Note:** User services only run while you are logged in. To keep the gateway running after logout, enable lingering:
+>
+> ```bash
+> loginctl enable-linger $USER
+> ```
+
 ## 📁 Project Structure
 
 ```
@@ -932,8 +958,6 @@ nanobot/
 ## 🤝 Contribute & Roadmap
 
 PRs welcome! The codebase is intentionally small and readable. 🤗
-
-For fork maintenance after upstream syncs, see [`MERGE_GUARDS.md`](MERGE_GUARDS.md) for kept-feature guardrails and the test checklist.
 
 **Roadmap** — Pick an item and [open a PR](https://github.com/HKUDS/nanobot/pulls)!
 
