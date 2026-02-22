@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from pathlib import Path
 from typing import Any
 from loguru import logger
 from telegram import BotCommand, Update
@@ -13,6 +14,7 @@ from telegram.request import HTTPXRequest
 from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
+from nanobot.agent.slash_commands import SlashCommandsLoader
 from nanobot.config.schema import TelegramConfig
 
 TELEGRAM_MAX_MESSAGE_CHARS = 3800
@@ -150,15 +152,21 @@ class TelegramChannel(BaseChannel):
         config: TelegramConfig,
         bus: MessageBus,
         groq_api_key: str = "",
+        workspace: Path | None = None,
     ):
         super().__init__(config, bus)
         self.config: TelegramConfig = config
         self.groq_api_key = groq_api_key
+        self.workspace = Path(workspace).expanduser() if workspace else (Path.home() / ".nanobot" / "workspace")
+        self._slash_commands = SlashCommandsLoader(self.workspace)
+        self._custom_command_names: list[str] = []
+        self._bot_commands: list[BotCommand] = list(self.BOT_COMMANDS)
         self._app: Application | None = None
         self._chat_ids: dict[str, int] = {}  # Map sender_id to chat_id for replies
         self._typing_tasks: dict[str, asyncio.Task] = {}  # chat_id -> typing loop task
         self._reaction_handler_mode: str = "none"  # none | filters | fallback
         self._message_thread_ids: dict[tuple[str, int], int] = {}  # (chat_id, message_id) -> thread_id
+        self._sender_topic_threads: dict[tuple[str, str], int] = {}  # (sender_id, chat_id) -> last thread_id
         self._progress_message_ids: dict[tuple[int, int | None], int] = {}  # (chat_id, thread_id) -> message_id
     
     async def start(self) -> None:
@@ -178,6 +186,7 @@ class TelegramChannel(BaseChannel):
         self._app.add_error_handler(self._on_error)
         
         # Add command handlers
+        self._load_custom_commands()
         self._app.add_handler(CommandHandler("start", self._on_start))
         self._app.add_handler(CommandHandler("new", self._forward_command))
         self._app.add_handler(CommandHandler("help", self._forward_command))
@@ -185,6 +194,8 @@ class TelegramChannel(BaseChannel):
         self._app.add_handler(CommandHandler("skills", self._forward_command))
         self._app.add_handler(CommandHandler("skill", self._forward_command))
         self._app.add_handler(CommandHandler("model", self._forward_command))
+        for name in self._custom_command_names:
+            self._app.add_handler(CommandHandler(name, self._forward_command))
         
         # Add message handler for text, photos, voice, documents
         self._app.add_handler(
@@ -208,7 +219,7 @@ class TelegramChannel(BaseChannel):
         logger.info(f"Telegram bot @{bot_info.username} connected")
         
         try:
-            await self._app.bot.set_my_commands(self.BOT_COMMANDS)
+            await self._app.bot.set_my_commands(self._bot_commands)
             logger.debug("Telegram bot commands registered")
         except Exception as e:
             logger.warning(f"Failed to register bot commands: {e}")
@@ -222,6 +233,24 @@ class TelegramChannel(BaseChannel):
         # Keep running until stopped
         while self._running:
             await asyncio.sleep(1)
+
+    def _load_custom_commands(self) -> None:
+        """Load workspace slash commands and merge into Telegram command menu."""
+        builtins = {cmd.command for cmd in self.BOT_COMMANDS}
+        builtins.add("compact")
+        bot_commands = list(self.BOT_COMMANDS)
+        custom_names: list[str] = []
+
+        for command in self._slash_commands.list_commands():
+            name = command["name"]
+            if name in builtins:
+                logger.warning(f"Ignoring slash command '/{name}' from {command['path']}: name collides with built-in command")
+                continue
+            bot_commands.append(BotCommand(name, command["description"]))
+            custom_names.append(name)
+
+        self._bot_commands = bot_commands
+        self._custom_command_names = custom_names
     
     async def stop(self) -> None:
         """Stop the Telegram bot."""
@@ -412,7 +441,12 @@ class TelegramChannel(BaseChannel):
         """Forward slash commands to the bus for unified handling in AgentLoop."""
         if not update.message or not update.effective_user:
             return
+        sender_id = self._sender_id(update.effective_user)
+        chat_id = str(update.message.chat_id)
         thread_id = self._resolve_incoming_thread_id(update.message)
+        if thread_id is None:
+            thread_id = self._sender_topic_threads.get((sender_id, chat_id))
+        self._remember_sender_thread(sender_id, chat_id, thread_id)
         self._remember_message_thread(
             chat_id=update.message.chat_id,
             message_id=update.message.message_id,
@@ -420,8 +454,8 @@ class TelegramChannel(BaseChannel):
         )
         session_key = f"{self.name}:{update.message.chat_id}:{thread_id}" if thread_id is not None else None
         await self._handle_message(
-            sender_id=self._sender_id(update.effective_user),
-            chat_id=str(update.message.chat_id),
+            sender_id=sender_id,
+            chat_id=chat_id,
             content=update.message.text,
             metadata={
                 "telegram": {
@@ -449,6 +483,7 @@ class TelegramChannel(BaseChannel):
             message_id=message.message_id,
             thread_id=thread_id,
         )
+        self._remember_sender_thread(sender_id, str(chat_id), thread_id)
         
         # Build content from text and/or media
         content_parts = []
@@ -584,6 +619,16 @@ class TelegramChannel(BaseChannel):
         if mid is None:
             return None
         return self._message_thread_ids.get((chat_id, mid))
+
+    def _remember_sender_thread(self, sender_id: str, chat_id: str, thread_id: Any) -> None:
+        """Track a user's most recent topic thread in a chat for command-routing fallback."""
+        tid = self._as_int(thread_id)
+        if tid is None:
+            return
+        self._sender_topic_threads[(sender_id, chat_id)] = tid
+        if len(self._sender_topic_threads) > 5000:
+            oldest = next(iter(self._sender_topic_threads))
+            self._sender_topic_threads.pop(oldest, None)
 
     async def _on_reaction(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle Telegram message reaction updates."""

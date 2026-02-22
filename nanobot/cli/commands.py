@@ -20,6 +20,7 @@ from prompt_toolkit.patch_stdout import patch_stdout
 
 from nanobot import __version__, __logo__
 from nanobot.config.schema import Config
+from nanobot.utils.env import with_nvm_env
 
 app = typer.Typer(
     name="nanobot",
@@ -29,6 +30,14 @@ app = typer.Typer(
 
 console = Console()
 EXIT_COMMANDS = {"exit", "quit", "/exit", "/quit", ":q"}
+CRON_NON_INTERACTIVE_PREFIX = (
+    "[Scheduled unattended run]\n"
+    "This task is running from cron with no human available to approve follow-ups.\n"
+    "Execute the full request end-to-end in this single run.\n"
+    "Do NOT ask for confirmation, approval, or permission to continue.\n"
+    "Do NOT stop after partial progress.\n"
+    "If details are ambiguous, choose the safest reasonable assumption, continue, and state that assumption in the final report.\n"
+)
 
 # ---------------------------------------------------------------------------
 # CLI input: prompt_toolkit for editing, paste, history, and display
@@ -278,6 +287,20 @@ This file stores important information that should persist across sessions.
     skills_dir = workspace / "skills"
     skills_dir.mkdir(exist_ok=True)
 
+    # Create slash directory for custom Telegram slash commands
+    slash_dir = workspace / "slash"
+    slash_dir.mkdir(exist_ok=True)
+    sample_slash = slash_dir / "example.md"
+    if not sample_slash.exists():
+        sample_slash.write_text(
+            "---\n"
+            "name: daily_review\n"
+            "description: Run daily review workflow\n"
+            "---\n"
+            "Review today's key conversations, extract decisions, and list 3 actionable follow-ups.\n"
+        )
+        console.print("  [dim]Created slash/example.md[/dim]")
+
 
 def _make_provider(config: Config):
     """Create the appropriate LLM provider from config."""
@@ -348,6 +371,49 @@ def _normalize_sdk_model_name(model: str) -> str:
     if cleaned.lower().startswith("openai-codex/"):
         return cleaned.split("/", 1)[1]
     return cleaned
+
+
+def _normalize_chat_model_name(model: str) -> str:
+    """Normalize legacy bare Codex names to openai-codex/<model>."""
+    cleaned = (model or "").strip()
+    if not cleaned:
+        return cleaned
+    if cleaned.startswith("openai-codex/"):
+        return cleaned
+    if "/" in cleaned:
+        return cleaned
+    if cleaned.startswith("gpt-") and "codex" in cleaned:
+        return f"openai-codex/{cleaned}"
+    return cleaned
+
+
+def _build_cron_prompt(task_message: str) -> str:
+    """Wrap cron task prompts with unattended execution guardrails."""
+    message = (task_message or "").strip()
+    if not message:
+        return CRON_NON_INTERACTIVE_PREFIX
+    return f"{CRON_NON_INTERACTIVE_PREFIX}\nTask:\n{message}"
+
+
+def _build_context_limits(config: Config) -> tuple[float, int, dict[str, int]]:
+    """Build prompt warning and model context limits for main/cron models."""
+    defaults = config.agents.defaults
+    threshold = max(0.1, min(float(defaults.context_warning_threshold), 0.95))
+    main_limit = max(8_000, int(defaults.model_context_limit_tokens))
+    cron_limit = int(defaults.cron_context_limit_tokens) if defaults.cron_context_limit_tokens else main_limit
+    if cron_limit <= 0:
+        cron_limit = main_limit
+
+    limits: dict[str, int] = {}
+    main_model = _normalize_chat_model_name(defaults.model)
+    if main_model:
+        limits[main_model.lower()] = main_limit
+
+    cron_model = _normalize_chat_model_name(defaults.cron_model or "")
+    if cron_model:
+        limits[cron_model.lower()] = cron_limit
+
+    return threshold, main_limit, limits
 
 
 def _make_codex_worker_provider(config: Config):
@@ -423,6 +489,8 @@ def gateway(
     cron = CronService(cron_store_path)
     
     # Create agent with cron service
+    context_warning_threshold, default_context_limit_tokens, model_context_limits = _build_context_limits(config)
+
     agent = AgentLoop(
         bus=bus,
         provider=provider,
@@ -443,6 +511,9 @@ def gateway(
         spawn_bridge_mode=spawn_bridge_mode,
         subagent_fallback_models=worker_fallback_models,
         subagent_heartbeat_interval_seconds=worker_heartbeat_interval,
+        context_warning_threshold=context_warning_threshold,
+        default_context_limit_tokens=default_context_limit_tokens,
+        model_context_limits=model_context_limits,
     )
     
     # Set cron callback (needs agent)
@@ -451,7 +522,7 @@ def gateway(
     async def on_cron_job(job: CronJob) -> str | None:
         """Execute a cron job through the agent."""
         response = await agent.process_direct(
-            job.payload.message,
+            _build_cron_prompt(job.payload.message),
             session_key=f"cron:{job.id}",
             channel=job.payload.channel or "cli",
             chat_id=job.payload.to or "direct",
@@ -557,6 +628,8 @@ def agent(
     else:
         logger.disable("nanobot")
     
+    context_warning_threshold, default_context_limit_tokens, model_context_limits = _build_context_limits(config)
+
     agent_loop = AgentLoop(
         bus=bus,
         provider=provider,
@@ -576,6 +649,9 @@ def agent(
         spawn_bridge_mode=spawn_bridge_mode,
         subagent_fallback_models=worker_fallback_models,
         subagent_heartbeat_interval_seconds=worker_heartbeat_interval,
+        context_warning_threshold=context_warning_threshold,
+        default_context_limit_tokens=default_context_limit_tokens,
+        model_context_limits=model_context_limits,
     )
     
     # Show spinner when logs are off (no output to miss); skip when logs are on
@@ -729,8 +805,10 @@ def _get_bridge_dir() -> Path:
     if (user_bridge / "dist" / "index.js").exists():
         return user_bridge
     
+    env = with_nvm_env()
+
     # Check for npm
-    if not shutil.which("npm"):
+    if not shutil.which("npm", path=env.get("PATH")):
         console.print("[red]npm not found. Please install Node.js >= 18.[/red]")
         raise typer.Exit(1)
     
@@ -760,10 +838,22 @@ def _get_bridge_dir() -> Path:
     # Install and build
     try:
         console.print("  Installing dependencies...")
-        subprocess.run(["npm", "install"], cwd=user_bridge, check=True, capture_output=True)
+        subprocess.run(
+            ["npm", "install"],
+            cwd=user_bridge,
+            check=True,
+            capture_output=True,
+            env=env,
+        )
         
         console.print("  Building...")
-        subprocess.run(["npm", "run", "build"], cwd=user_bridge, check=True, capture_output=True)
+        subprocess.run(
+            ["npm", "run", "build"],
+            cwd=user_bridge,
+            check=True,
+            capture_output=True,
+            env=env,
+        )
         
         console.print("[green]✓[/green] Bridge ready\n")
     except subprocess.CalledProcessError as e:
@@ -787,7 +877,7 @@ def channels_login():
     console.print(f"{__logo__} Starting bridge...")
     console.print("Scan the QR code to connect.\n")
     
-    env = {**os.environ}
+    env = with_nvm_env()
     if config.channels.whatsapp.bridge_token:
         env["BRIDGE_TOKEN"] = config.channels.whatsapp.bridge_token
     

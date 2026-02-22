@@ -3,6 +3,7 @@
 import asyncio
 from contextvars import ContextVar, Token
 from contextlib import AsyncExitStack
+from datetime import datetime
 import json
 import json_repair
 from pathlib import Path
@@ -16,6 +17,7 @@ from nanobot.bus.queue import MessageBus
 from nanobot.providers.base import LLMProvider
 from nanobot.agent.context import ContextBuilder
 from nanobot.agent.skills import BUILTIN_SKILLS_DIR
+from nanobot.agent.slash_commands import SlashCommandsLoader
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.filesystem import ReadFileTool, WriteFileTool, EditFileTool, ListDirTool
 from nanobot.agent.tools.shell import ExecTool
@@ -69,7 +71,11 @@ class AgentLoop:
         "web search tool",
         "api key not configured",
     )
+    DEFAULT_CONTEXT_LIMIT_TOKENS = 128_000
+    DEFAULT_CONTEXT_WARNING_THRESHOLD = 0.75
+    CORE_SLASH_COMMANDS = {"start", "new", "help", "last", "skills", "skill", "model", "compact"}
 
+    
     @staticmethod
     def _reaction_matches(tokens: set[str], candidates: set[str]) -> bool:
         """Match reaction tokens, allowing emoji variation/skin-tone suffixes."""
@@ -115,6 +121,9 @@ class AgentLoop:
         spawn_bridge_mode: bool = False,
         subagent_fallback_models: list[str] | None = None,
         subagent_heartbeat_interval_seconds: int = 30,
+        context_warning_threshold: float = DEFAULT_CONTEXT_WARNING_THRESHOLD,
+        default_context_limit_tokens: int = DEFAULT_CONTEXT_LIMIT_TOKENS,
+        model_context_limits: dict[str, int] | None = None,
     ):
         from nanobot.config.schema import ExecToolConfig
         from nanobot.cron.service import CronService
@@ -138,6 +147,7 @@ class AgentLoop:
         }
 
         self.context = ContextBuilder(workspace, disabled_skills=disabled_skills)
+        self.slash_commands = SlashCommandsLoader(workspace)
         self.sessions = session_manager or SessionManager(workspace)
         self.tools = ToolRegistry()
         self._web_research_provider = (
@@ -178,6 +188,13 @@ class AgentLoop:
         )
         self._session_queues: dict[str, asyncio.Queue[InboundMessage]] = {}
         self._session_workers: dict[str, asyncio.Task[None]] = {}
+        self.context_warning_threshold = max(0.1, min(context_warning_threshold, 0.95))
+        self.default_context_limit_tokens = max(8_000, default_context_limit_tokens)
+        self.model_context_limits = {
+            (k or "").strip().lower(): int(v)
+            for k, v in (model_context_limits or {}).items()
+            if str(k).strip() and isinstance(v, int) and v > 0
+        }
         self._register_default_tools()
     
     def _register_default_tools(self) -> None:
@@ -371,6 +388,129 @@ class AgentLoop:
                 return tc.name
             return f'{tc.name}("{val[:40]}…")' if len(val) > 40 else f'{tc.name}("{val}")'
         return ", ".join(_fmt(tc) for tc in tool_calls)
+
+
+    @staticmethod
+    def _estimate_text_tokens(text: str) -> int:
+        """Rough token estimate (~4 chars/token) with a small floor."""
+        if not text:
+            return 0
+        return max(1, (len(text) + 3) // 4)
+
+    def _estimate_prompt_tokens(self, messages: list[dict[str, Any]]) -> int:
+        """Estimate prompt tokens for warning/compaction heuristics."""
+        total = 0
+        for msg in messages:
+            total += 6
+            role = msg.get("role")
+            if isinstance(role, str):
+                total += self._estimate_text_tokens(role)
+            content = msg.get("content")
+            if isinstance(content, str):
+                total += self._estimate_text_tokens(content)
+            elif isinstance(content, list):
+                for item in content:
+                    if not isinstance(item, dict):
+                        continue
+                    if item.get("type") == "text":
+                        total += self._estimate_text_tokens(str(item.get("text", "")))
+                    elif item.get("type") == "image_url":
+                        total += 1000
+
+            for key in ("tool_calls", "tool_call_id", "name", "reasoning_content"):
+                value = msg.get(key)
+                if value is None:
+                    continue
+                if isinstance(value, str):
+                    total += self._estimate_text_tokens(value)
+                else:
+                    total += self._estimate_text_tokens(json.dumps(value, ensure_ascii=False))
+        return total
+
+    def _get_model_context_limit_tokens(self, model: str | None) -> int:
+        """Get estimated model context limit (tokens) for warning thresholds."""
+        normalized = (self._normalize_model_name(model) or "").strip().lower()
+        if normalized in self.model_context_limits:
+            return self.model_context_limits[normalized]
+        if normalized.startswith("openai-codex/"):
+            return max(self.default_context_limit_tokens, 200_000)
+        return self.default_context_limit_tokens
+
+    async def _summarize_for_compaction(self, old_messages: list[dict[str, Any]]) -> str:
+        """Create a compact summary to preserve older context after compaction."""
+        lines: list[str] = []
+        max_chars = 48_000
+        used_chars = 0
+        for m in old_messages:
+            content = str(m.get("content", "")).strip()
+            if not content:
+                continue
+            if len(content) > 1200:
+                content = content[:1200] + "... [truncated]"
+            line = f"[{m.get('timestamp', '?')[:16]}] {str(m.get('role', 'unknown')).upper()}: {content}"
+            line_len = len(line) + 1
+            if used_chars + line_len > max_chars:
+                break
+            lines.append(line)
+            used_chars += line_len
+
+        if not lines:
+            return "No older content to summarize."
+
+        prompt = (
+            "Summarize this older chat context for future continuity.\n"
+            "Return concise markdown with these sections:\n"
+            "1) Key decisions\n2) Ongoing tasks\n3) User preferences/facts\n4) Open questions\n"
+            "Keep it short and specific.\n\n"
+            "Conversation:\n"
+            + "\n".join(lines)
+        )
+
+        response = await self.provider.chat(
+            messages=[
+                {"role": "system", "content": "You write concise, factual context summaries."},
+                {"role": "user", "content": prompt},
+            ],
+            model=self.model,
+            max_tokens=max(512, min(self.max_tokens, 1400)),
+            temperature=0.2,
+        )
+        summary = self._strip_think(response.content) or ""
+        return summary.strip() or "Older chat context was compacted. See memory/HISTORY.md for details."
+
+    async def _compact_session_context(self, session: Session) -> tuple[int, int]:
+        """Consolidate memory first, then compact old chat messages in-session."""
+        total_before = len(session.messages)
+        keep_recent = max(12, self.memory_window // 2)
+        if total_before <= keep_recent:
+            return total_before, total_before
+
+        temp_session = Session(key=session.key)
+        temp_session.messages = list(session.messages)
+        temp_session.last_consolidated = 0
+        await self._consolidate_memory(temp_session, force=True)
+
+        old_messages = session.messages[:-keep_recent]
+        recent_messages = session.messages[-keep_recent:]
+        summary = await self._summarize_for_compaction(old_messages)
+        stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+        summary_entry = {
+            "role": "assistant",
+            "content": (
+                f"[Context compacted {stamp}]\n"
+                "Older conversation was consolidated into memory files and summarized below.\n\n"
+                f"{summary}"
+            ),
+            "timestamp": datetime.now().isoformat(),
+            "compaction_summary": True,
+        }
+        session.messages = [summary_entry, *recent_messages]
+        session.last_consolidated = 1
+        session.metadata.pop("pending_action", None)
+        session.metadata.pop("context_compact_warning", None)
+        session.metadata["last_compacted_at"] = datetime.now().isoformat()
+        self.sessions.save(session)
+        return total_before, len(session.messages)
 
     def _get_active_route(self) -> tuple[str, str] | None:
         """Get current routing context for context-aware tools."""
@@ -671,9 +811,23 @@ class AgentLoop:
                 "/new — Start a new conversation\n"
                 "/help — Show available commands\n"
                 "/last — Resend the last assistant response\n"
+                "/compact — Compact session context after memory consolidation\n"
                 "/skills — List available skills\n"
                 "/skill — Configure active skills for this chat/topic\n"
                 "/model — Configure model override for this chat/topic"
+            )
+        if cmd_base == "/compact":
+            before, after = await self._compact_session_context(session)
+            if before == after:
+                return _reply(
+                    f"Context compaction skipped: session has {before} messages, "
+                    f"which is within keep window."
+                )
+            return _reply(
+                "Context compacted successfully.\n"
+                f"Messages before: {before}\n"
+                f"Messages after: {after}\n"
+                "Memory was consolidated first into memory/MEMORY.md and memory/HISTORY.md."
             )
         if cmd_base == "/last":
             last_assistant = next(
@@ -808,7 +962,41 @@ class AgentLoop:
             session.metadata.pop("pending_model_choices", None)
             self.sessions.save(session)
             return _reply(f"Model override set to: {selected}")
-        
+        if pending_action == "confirm_compact":
+            text = raw_cmd.strip().lower()
+            if text in {"compact", "/compact", "yes", "y"}:
+                before, after = await self._compact_session_context(session)
+                return _reply(
+                    "Compaction finished.\n"
+                    f"Messages before: {before}\n"
+                    f"Messages after: {after}\n"
+                    "You can continue the conversation now."
+                )
+            if text in {"continue", "no", "n", "skip"}:
+                session.metadata.pop("pending_action", None)
+                session.metadata["context_compact_warning"] = "acknowledged"
+                self.sessions.save(session)
+                return _reply("Okay, keeping full recent context for now.")
+            session.metadata.pop("pending_action", None)
+            self.sessions.save(session)
+
+        effective_user_message = msg.content
+        custom_slash = None
+        if cmd_base.startswith("/"):
+            slash_name = cmd_base[1:]
+            if slash_name and slash_name not in self.CORE_SLASH_COMMANDS:
+                custom_slash = self.slash_commands.get_command(slash_name)
+        if custom_slash is not None:
+            args = raw_cmd[len(cmd_token):].strip() if cmd_token else ""
+            args_text = args if args else "(none)"
+            effective_user_message = (
+                f"[Slash command invoked: /{custom_slash['name']}]\n"
+                f"Description: {custom_slash['description']}\n"
+                f"Arguments: {args_text}\n\n"
+                "Follow this slash-command prompt for this turn:\n"
+                f"{custom_slash['prompt']}"
+            )
+
         if len(session.messages) > self.memory_window:
             asyncio.create_task(self._consolidate_memory(session))
 
@@ -833,7 +1021,7 @@ class AgentLoop:
 
             initial_messages = self.context.build_messages(
                 history=session.get_history(max_messages=self.memory_window),
-                current_message=msg.content,
+                current_message=effective_user_message,
                 skill_names=active_skills if isinstance(active_skills, list) else None,
                 media=msg.media if msg.media else None,
                 channel=msg.channel,
@@ -890,6 +1078,25 @@ class AgentLoop:
         
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
         logger.info(f"Response to {msg.channel}:{msg.sender_id}: {preview}")
+
+        prompt_tokens_est = self._estimate_prompt_tokens(initial_messages)
+        context_limit = self._get_model_context_limit_tokens(model_for_session)
+        ratio = (prompt_tokens_est / context_limit) if context_limit > 0 else 0.0
+        should_warn = (
+            ratio >= self.context_warning_threshold
+            and session.metadata.get("context_compact_warning") != "acknowledged"
+        )
+        if should_warn:
+            percent = int(ratio * 100)
+            warning = (
+                "\n\n[Context warning] "
+                f"Estimated prompt usage is ~{prompt_tokens_est:,}/{context_limit:,} tokens ({percent}%). "
+                "Reply `compact` or run `/compact` to compact context now, "
+                "or reply `continue` to keep going without compacting."
+            )
+            final_content = f"{final_content}{warning}"
+            session.metadata["pending_action"] = "confirm_compact"
+            session.metadata["context_compact_warning"] = "pending"
         
         session.add_message("user", msg.content)
         session.add_message("assistant", final_content,

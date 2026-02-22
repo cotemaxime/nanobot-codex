@@ -7,7 +7,13 @@ from typer.testing import CliRunner
 import pytest
 from click.exceptions import Exit
 
-from nanobot.cli.commands import _is_gpt52_planner_mode, _make_codex_worker_provider, _make_provider, app
+from nanobot.cli.commands import (
+    _build_cron_prompt,
+    _is_gpt52_planner_mode,
+    _make_codex_worker_provider,
+    _make_provider,
+    app,
+)
 from nanobot.config.schema import Config
 
 runner = CliRunner()
@@ -165,3 +171,11 @@ def test_make_codex_worker_provider_uses_configured_model(monkeypatch, tmp_path)
     assert captured["diagnostic_logging"] is True
     assert captured["sandbox_mode"] == "danger-full-access"
     assert captured["approval_policy"] == "never"
+
+
+def test_build_cron_prompt_adds_non_interactive_guardrails():
+    prompt = _build_cron_prompt("Run task A then post summary.")
+
+    assert "[Scheduled unattended run]" in prompt
+    assert "Do NOT ask for confirmation" in prompt
+    assert "Task:\nRun task A then post summary." in prompt

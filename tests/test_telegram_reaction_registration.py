@@ -26,6 +26,27 @@ def _make_channel():
     return channel
 
 
+def test_load_custom_commands_from_workspace(tmp_path):
+    workspace = tmp_path / "workspace"
+    slash_dir = workspace / "slash"
+    slash_dir.mkdir(parents=True, exist_ok=True)
+    (slash_dir / "retro.md").write_text(
+        "---\n"
+        "name: retro\n"
+        "description: Run retrospective\n"
+        "---\n"
+        "Collect learnings for the day.\n",
+        encoding="utf-8",
+    )
+
+    channel = TelegramChannel(config=TelegramConfig(), bus=MessageBus(), workspace=workspace)
+    channel._load_custom_commands()
+
+    names = [cmd.command for cmd in channel._bot_commands]
+    assert "retro" in names
+    assert "retro" in channel._custom_command_names
+
+
 class _InMemorySessionManager:
     def __init__(self):
         self._sessions = {}
@@ -183,6 +204,34 @@ async def test_forward_command_keeps_zero_thread_id_in_session_key():
 
     assert captured["metadata"]["telegram"]["message_thread_id"] == 0
     assert captured["metadata"]["session_key"] == "telegram:123:0"
+
+
+@pytest.mark.asyncio
+async def test_forward_command_falls_back_to_sender_last_topic_thread():
+    channel = _make_channel()
+    captured = {}
+
+    async def _capture(**kwargs):
+        captured.update(kwargs)
+
+    channel._handle_message = _capture  # type: ignore[method-assign]
+    # Simulate user previously active in topic thread 99 in this chat.
+    channel._sender_topic_threads[("7|alice", "123")] = 99
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=7, username="alice"),
+        message=SimpleNamespace(
+            chat_id=123,
+            message_id=57,
+            message_thread_id=None,
+            reply_to_message=None,
+            text="/obsidiansave",
+        ),
+    )
+
+    await channel._forward_command(update, None)
+
+    assert captured["metadata"]["telegram"]["message_thread_id"] == 99
+    assert captured["metadata"]["session_key"] == "telegram:123:99"
 
 
 class DummyBot:
