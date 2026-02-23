@@ -74,6 +74,7 @@ class AgentLoop:
     DEFAULT_CONTEXT_LIMIT_TOKENS = 128_000
     DEFAULT_CONTEXT_WARNING_THRESHOLD = 0.75
     CORE_SLASH_COMMANDS = {"start", "new", "help", "last", "skills", "skill", "model", "compact"}
+    CHANNEL_CONTEXT_HINT_KEY = "channel_context_pinned"
 
     
     @staticmethod
@@ -371,6 +372,44 @@ class AgentLoop:
         if cron_tool := self.tools.get("cron"):
             if isinstance(cron_tool, CronTool):
                 cron_tool.set_context(channel, chat_id)
+
+    @staticmethod
+    def _is_group_or_topic_context(metadata: dict[str, Any] | None) -> bool:
+        """Detect group/channel topic style conversations for contextual hints."""
+        if not isinstance(metadata, dict):
+            return False
+        if bool(metadata.get("is_group")):
+            return True
+        telegram_meta = metadata.get("telegram")
+        if isinstance(telegram_meta, dict) and telegram_meta.get("message_thread_id") is not None:
+            return True
+        if metadata.get("target_kind") == "panel":
+            return True
+        if metadata.get("group_id"):
+            return True
+        return False
+
+    @classmethod
+    def _extract_channel_context_hint(cls, metadata: dict[str, Any] | None) -> str | None:
+        """Extract normalized pinned purpose hint from inbound metadata."""
+        if not isinstance(metadata, dict):
+            return None
+        raw = metadata.get(cls.CHANNEL_CONTEXT_HINT_KEY)
+        if not isinstance(raw, str):
+            return None
+        cleaned = raw.strip()
+        if not cleaned:
+            return None
+        return cleaned[:1200]
+
+    @classmethod
+    def _build_channel_context_system_message(cls, hint: str) -> str:
+        """Render the channel-purpose prompt block."""
+        return (
+            "## Channel Purpose Hint\n"
+            "This group/topic has a pinned context message. Treat it as guidance for channel intent:\n"
+            f"{hint}"
+        )
 
     @staticmethod
     def _strip_think(text: str | None) -> str | None:
@@ -767,6 +806,10 @@ class AgentLoop:
 
         key = self._resolve_session_key(msg, session_key)
         session = self.sessions.get_or_create(key)
+        incoming_context_hint = self._extract_channel_context_hint(msg.metadata if isinstance(msg.metadata, dict) else None)
+        if incoming_context_hint:
+            session.metadata[self.CHANNEL_CONTEXT_HINT_KEY] = incoming_context_hint
+            self.sessions.save(session)
         self._set_tool_context(
             msg.channel,
             msg.chat_id,
@@ -1027,6 +1070,19 @@ class AgentLoop:
                 channel=msg.channel,
                 chat_id=msg.chat_id,
             )
+            session_context_hint = session.metadata.get(self.CHANNEL_CONTEXT_HINT_KEY)
+            if (
+                isinstance(session_context_hint, str)
+                and session_context_hint.strip()
+                and self._is_group_or_topic_context(msg.metadata if isinstance(msg.metadata, dict) else None)
+            ):
+                initial_messages.insert(
+                    1,
+                    {
+                        "role": "system",
+                        "content": self._build_channel_context_system_message(session_context_hint.strip()),
+                    },
+                )
             if self.spawn_bridge_mode:
                 initial_messages.insert(
                     1,
@@ -1278,6 +1334,15 @@ class AgentLoop:
                 channel=origin_channel,
                 chat_id=origin_chat_id,
             )
+            session_context_hint = session.metadata.get(self.CHANNEL_CONTEXT_HINT_KEY)
+            if isinstance(session_context_hint, str) and session_context_hint.strip():
+                initial_messages.insert(
+                    1,
+                    {
+                        "role": "system",
+                        "content": self._build_channel_context_system_message(session_context_hint.strip()),
+                    },
+                )
             final_content, _ = await self._run_agent_loop(initial_messages, model=model_for_session)
         finally:
             self._active_route_ctx.reset(route_token)

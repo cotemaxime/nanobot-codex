@@ -317,6 +317,46 @@ async def test_default_bus_progress_streams_with_explicit_prefix(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_group_or_topic_prompt_includes_pinned_channel_context_hint(tmp_path):
+    manager = InMemorySessionManager()
+
+    def _assert_prompt(messages, _tools, _model):
+        system_blocks = [str(m.get("content", "")) for m in messages if m.get("role") == "system"]
+        joined = "\n".join(system_blocks)
+        assert "## Channel Purpose Hint" in joined
+        assert "Topic purpose: release coordination" in joined
+        return LLMResponse(content="done")
+
+    provider = ScriptedProvider(responses=[_assert_prompt])
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=provider,
+        workspace=tmp_path,
+        session_manager=manager,
+        model="test/default",
+    )
+
+    inbound = InboundMessage(
+        channel="telegram",
+        sender_id="7",
+        chat_id="123",
+        content="hello",
+        metadata={
+            "is_group": True,
+            "channel_context_pinned": "Topic purpose: release coordination",
+            "telegram": {"message_thread_id": 99},
+            "session_key": "telegram:123:99",
+        },
+    )
+    response = await loop._process_message(inbound)
+
+    assert response is not None
+    assert response.content == "done"
+    session = manager.get_or_create("telegram:123:99")
+    assert session.metadata.get("channel_context_pinned") == "Topic purpose: release coordination"
+
+
+@pytest.mark.asyncio
 async def test_agent_loop_does_not_inject_reflection_user_turn(tmp_path):
     f = tmp_path / "note.txt"
     f.write_text("tool output", encoding="utf-8")

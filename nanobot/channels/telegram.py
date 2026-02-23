@@ -168,6 +168,7 @@ class TelegramChannel(BaseChannel):
         self._message_thread_ids: dict[tuple[str, int], int] = {}  # (chat_id, message_id) -> thread_id
         self._sender_topic_threads: dict[tuple[str, str], int] = {}  # (sender_id, chat_id) -> last thread_id
         self._progress_message_ids: dict[tuple[int, int | None], int] = {}  # (chat_id, thread_id) -> message_id
+        self._session_context_hints: dict[str, str] = {}  # session_key -> pinned purpose hint
     
     async def start(self) -> None:
         """Start the Telegram bot with long polling."""
@@ -205,6 +206,10 @@ class TelegramChannel(BaseChannel):
                 self._on_message
             )
         )
+        status_update = getattr(filters, "StatusUpdate", None)
+        pinned_filter = getattr(status_update, "PINNED_MESSAGE", None) if status_update else None
+        if pinned_filter is not None:
+            self._app.add_handler(MessageHandler(pinned_filter, self._on_pinned_message_update))
         # Reaction updates (Telegram Bot API update types: message_reaction / message_reaction_count)
         self._register_reaction_handlers()
         
@@ -437,6 +442,49 @@ class TelegramChannel(BaseChannel):
         except (TypeError, ValueError):
             return None
 
+    @classmethod
+    def _session_key_for_message(cls, chat_id: str | int, thread_id: int | None) -> str:
+        """Build session key matching AgentLoop topic scoping."""
+        base = f"{cls.name}:{chat_id}"
+        return f"{base}:{thread_id}" if thread_id is not None else base
+
+    @staticmethod
+    def _extract_message_text(message: Any) -> str:
+        """Extract best-effort plain text from a Telegram message object."""
+        if not message:
+            return ""
+        text = getattr(message, "text", None) or getattr(message, "caption", None) or ""
+        text = str(text).strip()
+        if not text:
+            return ""
+        return text[:1200]
+
+    def _set_session_context_hint(self, chat_id: str | int, thread_id: int | None, hint: str) -> None:
+        """Store/update pinned purpose text for this chat/topic session."""
+        cleaned = str(hint or "").strip()
+        if not cleaned:
+            return
+        self._session_context_hints[self._session_key_for_message(chat_id, thread_id)] = cleaned[:1200]
+
+    def _get_session_context_hint(self, chat_id: str | int, thread_id: int | None) -> str | None:
+        """Get topic-specific hint first, then fall back to chat-level hint."""
+        topic_key = self._session_key_for_message(chat_id, thread_id)
+        if topic_key in self._session_context_hints:
+            return self._session_context_hints[topic_key]
+        chat_key = self._session_key_for_message(chat_id, None)
+        return self._session_context_hints.get(chat_key)
+
+    async def _on_pinned_message_update(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Capture pinned message text so future turns include channel purpose hints."""
+        if not update.message:
+            return
+        message = update.message
+        thread_id = self._resolve_incoming_thread_id(message)
+        pinned = getattr(message, "pinned_message", None)
+        hint = self._extract_message_text(pinned)
+        if hint:
+            self._set_session_context_hint(message.chat_id, thread_id, hint)
+
     async def _forward_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Forward slash commands to the bus for unified handling in AgentLoop."""
         if not update.message or not update.effective_user:
@@ -452,16 +500,21 @@ class TelegramChannel(BaseChannel):
             message_id=update.message.message_id,
             thread_id=thread_id,
         )
-        session_key = f"{self.name}:{update.message.chat_id}:{thread_id}" if thread_id is not None else None
+        session_key = self._session_key_for_message(update.message.chat_id, thread_id)
+        context_hint = self._get_session_context_hint(update.message.chat_id, thread_id)
+        chat_obj = getattr(update.message, "chat", None)
+        is_group = getattr(chat_obj, "type", "private") != "private"
         await self._handle_message(
             sender_id=sender_id,
             chat_id=chat_id,
             content=update.message.text,
             metadata={
+                "is_group": is_group,
                 "telegram": {
                     "message_thread_id": thread_id,
                 },
                 "session_key": session_key,
+                "channel_context_pinned": context_hint,
             },
         )
     
@@ -484,6 +537,13 @@ class TelegramChannel(BaseChannel):
             thread_id=thread_id,
         )
         self._remember_sender_thread(sender_id, str(chat_id), thread_id)
+        pinned_hint = self._extract_message_text(getattr(message, "pinned_message", None))
+        if pinned_hint:
+            self._set_session_context_hint(chat_id, thread_id, pinned_hint)
+        if not self._get_session_context_hint(chat_id, thread_id):
+            chat_level_pinned = self._extract_message_text(getattr(message.chat, "pinned_message", None))
+            if chat_level_pinned:
+                self._set_session_context_hint(chat_id, None, chat_level_pinned)
         
         # Build content from text and/or media
         content_parts = []
@@ -570,7 +630,8 @@ class TelegramChannel(BaseChannel):
                 "telegram": {
                     "message_thread_id": thread_id,
                 },
-                "session_key": f"{self.name}:{str_chat_id}:{thread_id}" if thread_id is not None else None,
+                "session_key": self._session_key_for_message(str_chat_id, thread_id),
+                "channel_context_pinned": self._get_session_context_hint(str_chat_id, thread_id),
             }
         )
 

@@ -163,7 +163,7 @@ async def test_forward_command_uses_reply_thread_when_direct_thread_missing():
 
     channel._handle_message = _capture  # type: ignore[method-assign]
     update = SimpleNamespace(
-        effective_user=SimpleNamespace(id=7, username="alice"),
+        effective_user=SimpleNamespace(id=7, username="alice", first_name="Alice"),
         message=SimpleNamespace(
             chat_id=123,
             message_id=55,
@@ -190,7 +190,7 @@ async def test_forward_command_keeps_zero_thread_id_in_session_key():
 
     channel._handle_message = _capture  # type: ignore[method-assign]
     update = SimpleNamespace(
-        effective_user=SimpleNamespace(id=7, username="alice"),
+        effective_user=SimpleNamespace(id=7, username="alice", first_name="Alice"),
         message=SimpleNamespace(
             chat_id=123,
             message_id=56,
@@ -218,7 +218,7 @@ async def test_forward_command_falls_back_to_sender_last_topic_thread():
     # Simulate user previously active in topic thread 99 in this chat.
     channel._sender_topic_threads[("7|alice", "123")] = 99
     update = SimpleNamespace(
-        effective_user=SimpleNamespace(id=7, username="alice"),
+        effective_user=SimpleNamespace(id=7, username="alice", first_name="Alice"),
         message=SimpleNamespace(
             chat_id=123,
             message_id=57,
@@ -232,6 +232,67 @@ async def test_forward_command_falls_back_to_sender_last_topic_thread():
 
     assert captured["metadata"]["telegram"]["message_thread_id"] == 99
     assert captured["metadata"]["session_key"] == "telegram:123:99"
+
+
+@pytest.mark.asyncio
+async def test_forward_command_includes_cached_channel_context_hint():
+    channel = _make_channel()
+    captured = {}
+
+    async def _capture(**kwargs):
+        captured.update(kwargs)
+
+    channel._handle_message = _capture  # type: ignore[method-assign]
+    channel._session_context_hints["telegram:123:99"] = "Topic purpose: release coordination"
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=7, username="alice"),
+        message=SimpleNamespace(
+            chat_id=123,
+            message_id=58,
+            message_thread_id=99,
+            reply_to_message=None,
+            text="/help",
+            chat=SimpleNamespace(type="supergroup"),
+        ),
+    )
+
+    await channel._forward_command(update, None)
+
+    assert captured["metadata"]["channel_context_pinned"] == "Topic purpose: release coordination"
+
+
+@pytest.mark.asyncio
+async def test_on_message_captures_and_forwards_pinned_context_hint():
+    channel = _make_channel()
+    captured = {}
+    channel._start_typing = lambda chat_id: None  # type: ignore[method-assign]
+
+    async def _capture(**kwargs):
+        captured.update(kwargs)
+
+    channel._handle_message = _capture  # type: ignore[method-assign]
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=7, username="alice", first_name="Alice"),
+        message=SimpleNamespace(
+            chat_id=123,
+            message_id=59,
+            message_thread_id=99,
+            reply_to_message=None,
+            text="status update",
+            caption=None,
+            photo=None,
+            voice=None,
+            audio=None,
+            document=None,
+            pinned_message=SimpleNamespace(text="Topic purpose: deployment updates only"),
+            chat=SimpleNamespace(type="supergroup", pinned_message=None),
+        ),
+    )
+
+    await channel._on_message(update, None)
+
+    assert captured["metadata"]["channel_context_pinned"] == "Topic purpose: deployment updates only"
+    assert channel._session_context_hints["telegram:123:99"] == "Topic purpose: deployment updates only"
 
 
 class DummyBot:
