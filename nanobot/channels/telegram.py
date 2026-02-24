@@ -167,6 +167,7 @@ class TelegramChannel(BaseChannel):
         self._reaction_handler_mode: str = "none"  # none | filters | fallback
         self._message_thread_ids: dict[tuple[str, int], int] = {}  # (chat_id, message_id) -> thread_id
         self._sender_topic_threads: dict[tuple[str, str], int] = {}  # (sender_id, chat_id) -> last thread_id
+        self._chat_topic_threads: dict[str, int] = {}  # chat_id -> last seen topic thread_id
         self._progress_message_ids: dict[tuple[int, int | None], int] = {}  # (chat_id, thread_id) -> message_id
         self._session_context_hints: dict[str, str] = {}  # session_key -> pinned purpose hint
     
@@ -192,6 +193,7 @@ class TelegramChannel(BaseChannel):
         self._app.add_handler(CommandHandler("new", self._forward_command))
         self._app.add_handler(CommandHandler("help", self._forward_command))
         self._app.add_handler(CommandHandler("last", self._forward_command))
+        self._app.add_handler(CommandHandler("compact", self._forward_command))
         self._app.add_handler(CommandHandler("skills", self._forward_command))
         self._app.add_handler(CommandHandler("skill", self._forward_command))
         self._app.add_handler(CommandHandler("model", self._forward_command))
@@ -294,8 +296,8 @@ class TelegramChannel(BaseChannel):
 
         try:
             chat_id = int(msg.chat_id)
-            telegram_meta = (msg.metadata or {}).get("telegram", {})
-            thread_id = telegram_meta.get("message_thread_id")
+            telegram_meta = (msg.metadata or {}).get("telegram", {}) if isinstance(msg.metadata, dict) else {}
+            thread_id = self._as_int(telegram_meta.get("message_thread_id"))
         except ValueError:
             logger.error(f"Invalid chat_id: {msg.chat_id}")
             return
@@ -491,10 +493,17 @@ class TelegramChannel(BaseChannel):
             return
         sender_id = self._sender_id(update.effective_user)
         chat_id = str(update.message.chat_id)
-        thread_id = self._resolve_incoming_thread_id(update.message)
-        if thread_id is None:
-            thread_id = self._sender_topic_threads.get((sender_id, chat_id))
+        bare_sender_id = sender_id.split("|", 1)[0]
+        thread_id = self._resolve_command_thread_id(
+            message=update.message,
+            sender_id=sender_id,
+            bare_sender_id=bare_sender_id,
+            chat_id=chat_id,
+        )
         self._remember_sender_thread(sender_id, chat_id, thread_id)
+        if bare_sender_id and bare_sender_id != sender_id:
+            self._remember_sender_thread(bare_sender_id, chat_id, thread_id)
+        self._remember_chat_thread(chat_id, thread_id)
         self._remember_message_thread(
             chat_id=update.message.chat_id,
             message_id=update.message.message_id,
@@ -537,6 +546,7 @@ class TelegramChannel(BaseChannel):
             thread_id=thread_id,
         )
         self._remember_sender_thread(sender_id, str(chat_id), thread_id)
+        self._remember_chat_thread(str(chat_id), thread_id)
         pinned_hint = self._extract_message_text(getattr(message, "pinned_message", None))
         if pinned_hint:
             self._set_session_context_hint(chat_id, thread_id, pinned_hint)
@@ -691,6 +701,45 @@ class TelegramChannel(BaseChannel):
             oldest = next(iter(self._sender_topic_threads))
             self._sender_topic_threads.pop(oldest, None)
 
+    def _remember_chat_thread(self, chat_id: str, thread_id: Any) -> None:
+        """Track most recent topic thread seen in a chat as a coarse fallback."""
+        tid = self._as_int(thread_id)
+        if tid is None:
+            return
+        self._chat_topic_threads[chat_id] = tid
+        if len(self._chat_topic_threads) > 2000:
+            oldest = next(iter(self._chat_topic_threads))
+            self._chat_topic_threads.pop(oldest, None)
+
+    def _resolve_command_thread_id(
+        self,
+        message: Any,
+        sender_id: str,
+        bare_sender_id: str,
+        chat_id: str,
+    ) -> int | None:
+        """Resolve command topic thread with layered fallbacks to avoid leaking into main chat."""
+        direct = self._resolve_incoming_thread_id(message)
+        if direct is not None:
+            return direct
+        reply = getattr(message, "reply_to_message", None)
+        if reply is not None:
+            remembered = self._resolve_message_thread(
+                chat_id=chat_id,
+                message_id=getattr(reply, "message_id", None),
+                explicit_thread_id=getattr(reply, "message_thread_id", None),
+            )
+            if remembered is not None:
+                return remembered
+        remembered_sender = self._sender_topic_threads.get((sender_id, chat_id))
+        if remembered_sender is not None:
+            return remembered_sender
+        if bare_sender_id and bare_sender_id != sender_id:
+            remembered_bare = self._sender_topic_threads.get((bare_sender_id, chat_id))
+            if remembered_bare is not None:
+                return remembered_bare
+        return self._chat_topic_threads.get(chat_id)
+
     async def _on_reaction(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle Telegram message reaction updates."""
         reaction = update.message_reaction
@@ -730,6 +779,18 @@ class TelegramChannel(BaseChannel):
             message_id=message_id,
             explicit_thread_id=getattr(reaction, "message_thread_id", None),
         )
+        if thread_id is None:
+            bare_sender_id = sender_id.split("|", 1)[0]
+            thread_id = self._sender_topic_threads.get((sender_id, chat_id))
+            if thread_id is None and bare_sender_id and bare_sender_id != sender_id:
+                thread_id = self._sender_topic_threads.get((bare_sender_id, chat_id))
+            if thread_id is None:
+                thread_id = self._chat_topic_threads.get(chat_id)
+        bare_sender_id = sender_id.split("|", 1)[0]
+        self._remember_sender_thread(sender_id, chat_id, thread_id)
+        if bare_sender_id and bare_sender_id != sender_id:
+            self._remember_sender_thread(bare_sender_id, chat_id, thread_id)
+        self._remember_chat_thread(chat_id, thread_id)
         session_key = f"{self.name}:{chat_id}:{thread_id}" if thread_id is not None else None
         actor = first_name or username or sender_id.split("|", 1)[0]
         old_text = ", ".join(old_clean) if old_clean else "(none)"
@@ -775,6 +836,9 @@ class TelegramChannel(BaseChannel):
             message_id=message_id,
             explicit_thread_id=getattr(reaction_count, "message_thread_id", None),
         )
+        if thread_id is None:
+            thread_id = self._chat_topic_threads.get(chat_id)
+        self._remember_chat_thread(chat_id, thread_id)
         session_key = f"{self.name}:{chat_id}:{thread_id}" if thread_id is not None else None
         counts = getattr(reaction_count, "reactions", []) or []
         normalized_counts: list[dict[str, Any]] = []

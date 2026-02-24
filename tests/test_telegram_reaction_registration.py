@@ -154,6 +154,57 @@ async def test_reaction_metadata_uses_tracked_thread_id():
 
 
 @pytest.mark.asyncio
+async def test_reaction_falls_back_to_sender_last_topic_thread():
+    channel = _make_channel()
+    captured = {}
+    channel._sender_topic_threads[("7|alice", "123")] = 88
+
+    async def _capture(**kwargs):
+        captured.update(kwargs)
+
+    channel._handle_message = _capture  # type: ignore[method-assign]
+    reaction = SimpleNamespace(
+        user=SimpleNamespace(id=7, username="alice", first_name="Alice"),
+        actor_chat=None,
+        chat=SimpleNamespace(id=123),
+        old_reaction=[],
+        new_reaction=[SimpleNamespace(emoji="👍")],
+        message_id=42,
+        message_thread_id=None,
+    )
+    update = SimpleNamespace(message_reaction=reaction, effective_user=None)
+
+    await channel._on_reaction(update, None)
+
+    assert captured["metadata"]["telegram"]["message_thread_id"] == 88
+    assert captured["metadata"]["session_key"] == "telegram:123:88"
+
+
+@pytest.mark.asyncio
+async def test_reaction_count_falls_back_to_chat_last_topic_thread():
+    channel = _make_channel()
+    captured = {}
+    channel._chat_topic_threads["123"] = 77
+
+    async def _capture(**kwargs):
+        captured.update(kwargs)
+
+    channel._handle_message = _capture  # type: ignore[method-assign]
+    reaction_count = SimpleNamespace(
+        chat=SimpleNamespace(id=123),
+        message_id=52,
+        message_thread_id=None,
+        reactions=[SimpleNamespace(type=SimpleNamespace(emoji="👍"), total_count=1)],
+    )
+    update = SimpleNamespace(message_reaction_count=reaction_count)
+
+    await channel._on_reaction_count(update, None)
+
+    assert captured["metadata"]["telegram"]["message_thread_id"] == 77
+    assert captured["metadata"]["session_key"] == "telegram:123:77"
+
+
+@pytest.mark.asyncio
 async def test_forward_command_uses_reply_thread_when_direct_thread_missing():
     channel = _make_channel()
     captured = {}
@@ -232,6 +283,87 @@ async def test_forward_command_falls_back_to_sender_last_topic_thread():
 
     assert captured["metadata"]["telegram"]["message_thread_id"] == 99
     assert captured["metadata"]["session_key"] == "telegram:123:99"
+
+
+@pytest.mark.asyncio
+async def test_forward_command_falls_back_to_bare_sender_id_thread():
+    channel = _make_channel()
+    captured = {}
+
+    async def _capture(**kwargs):
+        captured.update(kwargs)
+
+    channel._handle_message = _capture  # type: ignore[method-assign]
+    channel._sender_topic_threads[("7", "123")] = 77
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=7, username="alice", first_name="Alice"),
+        message=SimpleNamespace(
+            chat_id=123,
+            message_id=58,
+            message_thread_id=None,
+            reply_to_message=None,
+            text="/help",
+        ),
+    )
+
+    await channel._forward_command(update, None)
+
+    assert captured["metadata"]["telegram"]["message_thread_id"] == 77
+    assert captured["metadata"]["session_key"] == "telegram:123:77"
+
+
+@pytest.mark.asyncio
+async def test_forward_command_falls_back_to_chat_last_topic_thread():
+    channel = _make_channel()
+    captured = {}
+
+    async def _capture(**kwargs):
+        captured.update(kwargs)
+
+    channel._handle_message = _capture  # type: ignore[method-assign]
+    channel._chat_topic_threads["123"] = 66
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=7, username="alice", first_name="Alice"),
+        message=SimpleNamespace(
+            chat_id=123,
+            message_id=59,
+            message_thread_id=None,
+            reply_to_message=None,
+            text="/model",
+        ),
+    )
+
+    await channel._forward_command(update, None)
+
+    assert captured["metadata"]["telegram"]["message_thread_id"] == 66
+    assert captured["metadata"]["session_key"] == "telegram:123:66"
+
+
+@pytest.mark.asyncio
+async def test_forward_command_uses_reply_message_id_thread_map_fallback():
+    channel = _make_channel()
+    captured = {}
+
+    async def _capture(**kwargs):
+        captured.update(kwargs)
+
+    channel._handle_message = _capture  # type: ignore[method-assign]
+    channel._remember_message_thread(chat_id="123", message_id=41, thread_id=55)
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=7, username="alice", first_name="Alice"),
+        message=SimpleNamespace(
+            chat_id=123,
+            message_id=60,
+            message_thread_id=None,
+            reply_to_message=SimpleNamespace(message_id=41, message_thread_id=None),
+            text="/help",
+        ),
+    )
+
+    await channel._forward_command(update, None)
+
+    assert captured["metadata"]["telegram"]["message_thread_id"] == 55
+    assert captured["metadata"]["session_key"] == "telegram:123:55"
 
 
 @pytest.mark.asyncio
@@ -375,6 +507,22 @@ async def test_progress_messages_are_silent_and_styled():
     assert call["parse_mode"] == "HTML"
     assert call["text"].startswith("<i>⏳ Running: read_file")
     assert channel._progress_message_ids[(123, 99)] == 100
+
+
+@pytest.mark.asyncio
+async def test_send_normalizes_string_thread_id_metadata():
+    channel = TelegramChannel(config=TelegramConfig(), bus=MessageBus())
+    channel._app = SimpleNamespace(bot=DummyBot())
+
+    await channel.send(OutboundMessage(
+        channel="telegram",
+        chat_id="123",
+        content="ok",
+        metadata={"telegram": {"message_thread_id": "99"}},
+    ))
+
+    assert len(channel._app.bot.sent) == 1
+    assert channel._app.bot.sent[0]["message_thread_id"] == 99
 
 
 @pytest.mark.asyncio

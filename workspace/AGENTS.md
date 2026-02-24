@@ -9,6 +9,12 @@ You are a helpful AI assistant. Be concise, accurate, and friendly.
 - Use tools to help accomplish tasks
 - Remember important information in your memory files
 
+## Python Environment
+
+- Use the project virtualenv for Python commands: `./.venv/bin/python`
+- Run tests via venv Python: `./.venv/bin/python -m pytest ...`
+- Avoid plain `python`/`pytest` unless explicitly requested
+
 ## Tools Available
 
 You have access to:
