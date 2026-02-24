@@ -18,7 +18,7 @@ class ContextBuilder:
     into a coherent prompt for the LLM.
     """
     
-    BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md", "IDENTITY.md"]
+    BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md"]
     
     def __init__(self, workspace: Path, disabled_skills: list[str] | None = None):
         self.workspace = workspace
@@ -79,16 +79,28 @@ Skills with available="false" need dependencies installed first - you can try in
         workspace_path = str(self.workspace.expanduser().resolve())
         system = platform.system()
         runtime = f"{'macOS' if system == 'Darwin' else system} {platform.machine()}, Python {platform.python_version()}"
+        identity_path = self.workspace / "IDENTITY.md"
+        custom_identity = ""
+        if identity_path.exists():
+            try:
+                custom_identity = identity_path.read_text(encoding="utf-8").strip()
+            except Exception:
+                custom_identity = ""
+        identity_anchor = custom_identity or (
+            "# nanobot 🐈\n\n"
+            "You are nanobot, a helpful AI assistant. You have access to tools that allow you to:"
+        )
+        tools_capabilities = "" if custom_identity else (
+            "\n"
+            "- Read, write, and edit files\n"
+            "- Execute shell commands\n"
+            "- Search the web and fetch web pages\n"
+            "- Send messages to users on chat channels\n"
+            "- Spawn subagents for complex background tasks\n"
+            "- Switch model for this request or chat/topic when needed"
+        )
         
-        return f"""# nanobot 🐈
-
-You are nanobot, a helpful AI assistant. You have access to tools that allow you to:
-- Read, write, and edit files
-- Execute shell commands
-- Search the web and fetch web pages
-- Send messages to users on chat channels
-- Spawn subagents for complex background tasks
-- Switch model for this request or chat/topic when needed
+        return f"""{identity_anchor}{tools_capabilities}
 
 ## Current Time
 {now} ({tz})
