@@ -3,6 +3,7 @@ import asyncio
 import pytest
 
 from nanobot.agent.loop import AgentLoop
+from nanobot.agent.memory import MemoryStore
 from nanobot.bus.events import InboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
@@ -764,6 +765,91 @@ async def test_memory_consolidation_uses_effective_model_override(tmp_path):
     await loop._consolidate_memory(session, archive_all=True)
 
     assert captured_models == ["openai-codex/gpt-5.3-codex"]
+
+
+def test_memory_store_sanitizes_volatile_sections(tmp_path):
+    memory = MemoryStore(tmp_path)
+    raw = """# Long-term Memory
+
+## Working Preferences
+- Prefers concise summaries.
+
+## Current TodoApp Investigation Context
+- 2026-02-24: probing endpoint behavior.
+- Job id b8101115 replaced old jobs.
+
+## Recent Ops Context
+- In progress: checking sync errors.
+"""
+    sanitized = memory.sanitize_long_term_content(raw, fallback="")
+    assert "Working Preferences" in sanitized
+    assert "Current TodoApp Investigation Context" not in sanitized
+    assert "Recent Ops Context" not in sanitized
+    assert "in progress" not in sanitized.lower()
+
+
+def test_memory_store_sanitizes_history_and_dedupes(tmp_path):
+    memory = MemoryStore(tmp_path)
+    raw = """
+[2026-02-21 10:18] User instructed the agent to read HEARTBEAT.md; reply HEARTBEAT_OK if nothing needs attention.
+
+[2026-02-24 05:00] Implemented planning sync fix and verified output.
+
+[2026-02-24 06:00] Implemented planning sync fix and verified output.
+"""
+    cleaned, stats = memory.sanitize_history_content(raw)
+    assert "HEARTBEAT_OK" not in cleaned
+    assert cleaned.count("planning sync fix") == 1
+    assert stats["total"] == 3
+    assert stats["kept"] == 1
+    assert stats["dropped_low_signal"] == 1
+    assert stats["dropped_duplicate"] == 1
+
+
+def test_memory_store_append_history_skips_low_signal_and_recent_duplicates(tmp_path):
+    memory = MemoryStore(tmp_path)
+    memory.append_history("[2026-02-24 05:00] Read HEARTBEAT.md and replied HEARTBEAT_OK.")
+    assert not memory.history_file.exists()
+
+    first = "[2026-02-24 05:01] Added durable memory sanitizer for consolidation."
+    second = "[2026-02-24 05:02] Added durable memory sanitizer for consolidation."
+    memory.append_history(first)
+    memory.append_history(second)
+
+    text = memory.history_file.read_text(encoding="utf-8")
+    assert text.count("durable memory sanitizer") == 1
+
+
+@pytest.mark.asyncio
+async def test_memory_consolidation_sanitizes_memory_update_before_write(tmp_path):
+    provider = ScriptedProvider(
+        responses=[
+            LLMResponse(
+                content="""{
+  "history_entry": "[2026-02-24 05:00] Completed investigation updates.",
+  "memory_update": "# Long-term Memory\\n\\n## Working Preferences\\n- Prefers local-first research.\\n\\n## Recent Technical Context\\n- In progress: probing CRM endpoints."
+}"""
+            )
+        ]
+    )
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=provider,
+        workspace=tmp_path,
+        session_manager=InMemorySessionManager(),
+        model="test/default",
+    )
+
+    session = Session(key="cli:mem-sanitize")
+    session.add_message("user", "Remember this.")
+    session.add_message("assistant", "Done.")
+    await loop._consolidate_memory(session, archive_all=True)
+
+    memory_file = tmp_path / "memory" / "MEMORY.md"
+    content = memory_file.read_text(encoding="utf-8")
+    assert "Working Preferences" in content
+    assert "Recent Technical Context" not in content
+    assert "in progress" not in content.lower()
 
 
 @pytest.mark.asyncio

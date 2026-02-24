@@ -1476,9 +1476,15 @@ class AgentLoop:
 
         prompt = f"""You are a memory consolidation agent. Process this conversation and return a JSON object with exactly two keys:
 
-1. "history_entry": A paragraph (2-5 sentences) summarizing the key events/decisions/topics. Start with a timestamp like [YYYY-MM-DD HH:MM]. Include enough detail to be useful when found by grep search later.
+1. "history_entry": A paragraph (2-5 sentences) summarizing key events/decisions/topics. Start with [YYYY-MM-DD HH:MM]. Include details useful for grep recall later.
 
-2. "memory_update": The updated long-term memory content. Add any new facts: user location, preferences, personal info, habits, project context, technical decisions, tools/services used. If nothing new, return the existing content unchanged.
+2. "memory_update": Full updated long-term memory markdown, but ONLY durable facts that should be injected on every future turn.
+
+Rules for memory_update:
+- Keep: stable user profile/preferences, durable environment facts, enduring project constraints/decisions that remain relevant across many sessions.
+- Exclude: recency logs, current/recent/new task status, investigations, one-off execution traces, dated progress notes, job/todo IDs, "in progress"/"implemented today" style updates.
+- Put all excluded items in history_entry instead.
+- If no durable memory changed, return the existing long-term memory unchanged.
 
 ## Current Long-term Memory
 {current_memory or "(empty)"}
@@ -1510,8 +1516,14 @@ Respond with ONLY valid JSON, no markdown fences."""
             if entry := result.get("history_entry"):
                 memory.append_history(entry)
             if update := result.get("memory_update"):
-                if update != current_memory:
-                    memory.write_long_term(update)
+                if not isinstance(update, str):
+                    update = json.dumps(update, ensure_ascii=False)
+                sanitized = memory.sanitize_long_term_content(
+                    update,
+                    fallback=current_memory,
+                )
+                if sanitized != current_memory:
+                    memory.write_long_term(sanitized)
 
             if archive_all:
                 session.last_consolidated = 0

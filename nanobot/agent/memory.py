@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 from typing import TYPE_CHECKING
 
 from loguru import logger
@@ -58,13 +59,166 @@ class MemoryStore:
     def write_long_term(self, content: str) -> None:
         self.memory_file.write_text(content, encoding="utf-8")
 
+    @staticmethod
+    def _normalize_history_entry(entry: str) -> str:
+        """Normalize one history entry for storage and dedupe checks."""
+        text = (entry or "").strip()
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text
+
+    @staticmethod
+    def _canonicalize_history_entry(entry: str) -> str:
+        """Build a fuzzy dedupe key that ignores timestamp and punctuation noise."""
+        text = MemoryStore._normalize_history_entry(entry).lower()
+        text = re.sub(r"^\[\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\]\s*", "", text)
+        text = re.sub(r"[^a-z0-9]+", " ", text).strip()
+        return text
+
+    @staticmethod
+    def _is_low_signal_history_entry(entry: str) -> bool:
+        """Drop repetitive low-information operational summaries from history."""
+        text = MemoryStore._normalize_history_entry(entry)
+        if not text:
+            return True
+        lower = text.lower()
+        low_signal_markers = (
+            "heartbeat_ok",
+            "read heartbeat.md",
+            "nothing needs attention",
+            "nothing required attention",
+            "no new conversation content",
+            "no additional tasks",
+            "no additional task outcomes",
+            "no additional user preferences",
+            "no further task outcomes",
+        )
+        return any(marker in lower for marker in low_signal_markers)
+
+    @staticmethod
+    def sanitize_history_content(content: str) -> tuple[str, dict[str, int]]:
+        """Remove low-signal and duplicate entries from full HISTORY.md content."""
+        raw = (content or "").strip()
+        if not raw:
+            return "", {"total": 0, "kept": 0, "dropped_low_signal": 0, "dropped_duplicate": 0}
+
+        chunks = [c.strip() for c in re.split(r"\n\s*\n+", raw) if c.strip()]
+        kept: list[str] = []
+        seen: set[str] = set()
+        dropped_low_signal = 0
+        dropped_duplicate = 0
+
+        for chunk in chunks:
+            entry = MemoryStore._normalize_history_entry(chunk)
+            if MemoryStore._is_low_signal_history_entry(entry):
+                dropped_low_signal += 1
+                continue
+            key = MemoryStore._canonicalize_history_entry(entry)
+            if key and key in seen:
+                dropped_duplicate += 1
+                continue
+            if key:
+                seen.add(key)
+            kept.append(entry)
+
+        cleaned = "\n\n".join(kept).strip()
+        if cleaned:
+            cleaned += "\n\n"
+        stats = {
+            "total": len(chunks),
+            "kept": len(kept),
+            "dropped_low_signal": dropped_low_signal,
+            "dropped_duplicate": dropped_duplicate,
+        }
+        return cleaned, stats
+
     def append_history(self, entry: str) -> None:
+        cleaned = self._normalize_history_entry(entry)
+        if self._is_low_signal_history_entry(cleaned):
+            logger.debug("History append skipped: low-signal entry")
+            return
+
+        key = self._canonicalize_history_entry(cleaned)
+        if self.history_file.exists():
+            try:
+                existing = self.history_file.read_text(encoding="utf-8")
+                recent = [c.strip() for c in re.split(r"\n\s*\n+", existing) if c.strip()][-50:]
+                recent_keys = {self._canonicalize_history_entry(item) for item in recent}
+                if key and key in recent_keys:
+                    logger.debug("History append skipped: duplicate of recent entry")
+                    return
+            except Exception:
+                logger.exception("History dedupe check failed; continuing append")
+
         with open(self.history_file, "a", encoding="utf-8") as f:
-            f.write(entry.rstrip() + "\n\n")
+            f.write(cleaned + "\n\n")
 
     def get_memory_context(self) -> str:
         long_term = self.read_long_term()
         return f"## Long-term Memory\n{long_term}" if long_term else ""
+
+    @staticmethod
+    def _is_volatile_memory_heading(heading: str) -> bool:
+        """Return whether a markdown section heading looks session/recency-specific."""
+        h = (heading or "").strip().lower()
+        if not h:
+            return False
+        if h.startswith(("recent ", "current ", "new ")):
+            return True
+        markers = (
+            "project context",
+            "context updates",
+            "investigation context",
+            "task context",
+            "ops context",
+            "workflow notes",
+            "technical context",
+            "todoapp investigation",
+            "heartbeat",
+        )
+        return any(m in h for m in markers)
+
+    @staticmethod
+    def _is_volatile_memory_line(line: str) -> bool:
+        """Filter obvious volatile bullets/log lines from long-term memory."""
+        text = (line or "").strip()
+        if not text:
+            return False
+        lowered = text.lower()
+        if re.search(r"^\[20\d{2}-\d{2}-\d{2}\s+\d{2}:\d{2}\]", text):
+            return True
+        if re.search(r"^-\s*\(20\d{2}-\d{2}-\d{2}\)", text):
+            return True
+        if re.search(r"\b(todo|task|job)\s+id\b", lowered):
+            return True
+        if "in progress" in lowered:
+            return True
+        return False
+
+    def sanitize_long_term_content(self, content: str, fallback: str = "") -> str:
+        """Keep durable memory only; drop volatile status/investigation sections."""
+        raw = (content or "").strip()
+        if not raw:
+            return fallback
+
+        kept: list[str] = []
+        drop_block = False
+        for line in raw.splitlines():
+            m = re.match(r"^(#{1,6})\s+(.*)$", line)
+            if m:
+                level = len(m.group(1))
+                heading = m.group(2).strip()
+                if level <= 2:
+                    drop_block = self._is_volatile_memory_heading(heading)
+            if drop_block:
+                continue
+            if self._is_volatile_memory_line(line):
+                continue
+            kept.append(line)
+
+        sanitized = "\n".join(kept).strip()
+        if not sanitized:
+            return fallback
+        return sanitized
 
     async def consolidate(
         self,
@@ -132,8 +286,9 @@ class MemoryStore:
             if update := args.get("memory_update"):
                 if not isinstance(update, str):
                     update = json.dumps(update, ensure_ascii=False)
-                if update != current_memory:
-                    self.write_long_term(update)
+                sanitized = self.sanitize_long_term_content(update, fallback=current_memory)
+                if sanitized != current_memory:
+                    self.write_long_term(sanitized)
 
             session.last_consolidated = 0 if archive_all else len(session.messages) - keep_count
             logger.info("Memory consolidation done: {} messages, last_consolidated={}", len(session.messages), session.last_consolidated)
