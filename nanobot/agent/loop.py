@@ -49,7 +49,7 @@ class AgentLoop:
         "openai-codex/gpt-5.1-codex",
         "openai-codex/gpt-5-codex",
         "openai-codex/gpt-5-codex-mini",
-        "openai-codex/gpt-5.2",
+        "openai-codex/gpt-5.3-codex",
     ]
     REACTION_APPROVE = {"👍", "✅", "☑️", "👌"}
     REACTION_RETRY = {"🔁", "🔄", "⟳"}
@@ -475,7 +475,26 @@ class AgentLoop:
             return max(self.default_context_limit_tokens, 200_000)
         return self.default_context_limit_tokens
 
-    async def _summarize_for_compaction(self, old_messages: list[dict[str, Any]]) -> str:
+    def _resolve_effective_model(
+        self,
+        session: Session | None = None,
+        forced_model: str | None = None,
+    ) -> str:
+        """Resolve model with request override, then session override, then default."""
+        active_model = self._active_model_ctx.get()
+        session_override = None
+        if session is not None:
+            session_override = session.metadata.get("model_override")
+        resolved = self._normalize_model_name(
+            forced_model or active_model or session_override or self.model
+        )
+        return resolved or self.model
+
+    async def _summarize_for_compaction(
+        self,
+        old_messages: list[dict[str, Any]],
+        model: str | None = None,
+    ) -> str:
         """Create a compact summary to preserve older context after compaction."""
         lines: list[str] = []
         max_chars = 48_000
@@ -510,7 +529,7 @@ class AgentLoop:
                 {"role": "system", "content": "You write concise, factual context summaries."},
                 {"role": "user", "content": prompt},
             ],
-            model=self.model,
+            model=self._resolve_effective_model(forced_model=model),
             max_tokens=max(512, min(self.max_tokens, 1400)),
             temperature=0.2,
         )
@@ -527,11 +546,19 @@ class AgentLoop:
         temp_session = Session(key=session.key)
         temp_session.messages = list(session.messages)
         temp_session.last_consolidated = 0
-        await self._consolidate_memory(temp_session, force=True)
+        model_for_session = self._resolve_effective_model(session=session)
+        await self._consolidate_memory(
+            temp_session,
+            force=True,
+            model_override=model_for_session,
+        )
 
         old_messages = session.messages[:-keep_recent]
         recent_messages = session.messages[-keep_recent:]
-        summary = await self._summarize_for_compaction(old_messages)
+        summary = await self._summarize_for_compaction(
+            old_messages,
+            model=model_for_session,
+        )
         stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
         summary_entry = {
             "role": "assistant",
@@ -837,6 +864,7 @@ class AgentLoop:
         if cmd_base == "/new":
             # Capture messages before clearing (avoid race condition with background task)
             messages_to_archive = session.messages.copy()
+            model_for_session = self._resolve_effective_model(session=session)
             session.clear()
             self.sessions.save(session)
             self.sessions.invalidate(session.key)
@@ -844,7 +872,11 @@ class AgentLoop:
             async def _consolidate_and_cleanup():
                 temp_session = Session(key=session.key)
                 temp_session.messages = messages_to_archive
-                await self._consolidate_memory(temp_session, archive_all=True)
+                await self._consolidate_memory(
+                    temp_session,
+                    archive_all=True,
+                    model_override=model_for_session,
+                )
 
             asyncio.create_task(_consolidate_and_cleanup())
             return _reply("New session started. Memory consolidation in progress.")
@@ -1040,13 +1072,18 @@ class AgentLoop:
                 f"{custom_slash['prompt']}"
             )
 
-        if len(session.messages) > self.memory_window:
-            asyncio.create_task(self._consolidate_memory(session))
-
         active_skills = session.metadata.get("active_skills")
-        model_for_session = self._normalize_model_name(
-            forced_model or session.metadata.get("model_override") or self.model
-        ) or self.model
+        model_for_session = self._resolve_effective_model(
+            session=session,
+            forced_model=forced_model,
+        )
+        if len(session.messages) > self.memory_window:
+            asyncio.create_task(
+                self._consolidate_memory(
+                    session,
+                    model_override=model_for_session,
+                )
+            )
 
         session_token: Token = self._active_session_ctx.set(session)
         model_token: Token = self._active_model_ctx.set(model_for_session)
@@ -1203,7 +1240,13 @@ class AgentLoop:
             text = "Acknowledged. Marked this as completed."
             session.add_message("assistant", text, reaction_control=True)
             self.sessions.save(session)
-            asyncio.create_task(self._consolidate_memory(session, force=True))
+            asyncio.create_task(
+                self._consolidate_memory(
+                    session,
+                    force=True,
+                    model_override=self._resolve_effective_model(session=session),
+                )
+            )
             return OutboundMessage(
                 channel=msg.channel,
                 chat_id=msg.chat_id,
@@ -1368,15 +1411,26 @@ class AgentLoop:
             metadata=origin_metadata,
         )
     
-    async def _consolidate_memory(self, session, archive_all: bool = False, force: bool = False) -> None:
+    async def _consolidate_memory(
+        self,
+        session: Session,
+        archive_all: bool = False,
+        force: bool = False,
+        model_override: str | None = None,
+    ) -> None:
         """Consolidate old messages into MEMORY.md + HISTORY.md.
 
         Args:
             archive_all: If True, clear all messages and reset session (for /new command).
                        If False, only write to files without modifying session.
             force: If True, process all unconsolidated messages immediately.
+            model_override: Optional model override for this consolidation run.
         """
         memory = MemoryStore(self.workspace)
+        consolidation_model = self._resolve_effective_model(
+            session=session,
+            forced_model=model_override,
+        )
 
         if archive_all:
             old_messages = session.messages
@@ -1440,7 +1494,7 @@ Respond with ONLY valid JSON, no markdown fences."""
                     {"role": "system", "content": "You are a memory consolidation agent. Respond only with valid JSON."},
                     {"role": "user", "content": prompt},
                 ],
-                model=self.model,
+                model=consolidation_model,
             )
             text = (response.content or "").strip()
             if not text:

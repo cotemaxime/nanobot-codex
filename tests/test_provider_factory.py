@@ -13,9 +13,9 @@ def test_create_provider_uses_openai_codex_for_oauth_model():
     assert isinstance(provider, OpenAICodexProvider)
 
 
-def test_create_provider_routes_gpt52_to_openai_codex_provider():
+def test_create_provider_routes_codex_oauth_model_to_openai_codex_provider():
     cfg = Config()
-    cfg.agents.defaults.model = "openai-codex/gpt-5.2"
+    cfg.agents.defaults.model = "openai-codex/gpt-5.3-codex"
 
     provider = create_provider(cfg)
     assert isinstance(provider, OpenAICodexProvider)

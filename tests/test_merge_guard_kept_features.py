@@ -118,7 +118,7 @@ async def test_model_override_is_scoped_by_topic_session_key(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_model_selection_supports_openai_gpt_5_2_option(tmp_path):
+async def test_model_selection_supports_openai_gpt_5_3_option(tmp_path):
     manager = InMemorySessionManager()
     loop = AgentLoop(
         bus=MessageBus(),
@@ -128,13 +128,13 @@ async def test_model_selection_supports_openai_gpt_5_2_option(tmp_path):
         model="openai-codex/gpt-5.1-codex",
     )
 
-    topic = "telegram:42:topic-gpt52"
+    topic = "telegram:42:topic-gpt53"
     await loop.process_direct("/model", session_key=topic, channel="telegram", chat_id="42")
     await loop.process_direct("4", session_key=topic, channel="telegram", chat_id="42")
 
     resp = await loop.process_direct("run", session_key=topic, channel="telegram", chat_id="42")
-    assert "openai-codex/gpt-5.2" in resp
-    assert manager.get_or_create(topic).metadata.get("model_override") == "openai-codex/gpt-5.2"
+    assert "openai-codex/gpt-5.3-codex" in resp
+    assert manager.get_or_create(topic).metadata.get("model_override") == "openai-codex/gpt-5.3-codex"
 
 
 @pytest.mark.asyncio

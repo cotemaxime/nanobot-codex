@@ -360,9 +360,9 @@ def _setup_runtime_file_logging(config: Config) -> None:
     )
 
 
-def _is_gpt52_planner_mode(config: Config) -> bool:
-    """Return whether planner model is OpenAI Codex GPT-5.2."""
-    return (config.agents.defaults.model or "").strip().lower() == "openai-codex/gpt-5.2"
+def _is_codex_planner_mode(config: Config) -> bool:
+    """Return whether planner model is OpenAI Codex."""
+    return (config.agents.defaults.model or "").strip().lower().startswith("openai-codex/")
 
 
 def _normalize_sdk_model_name(model: str) -> str:

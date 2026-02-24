@@ -72,13 +72,13 @@ class ReplayProvider(LLMProvider):
 
 
 def test_codex_model_does_not_register_nanobot_web_tools(tmp_path):
-    provider = ScriptedProvider(default_model="openai-codex/gpt-5.2")
+    provider = ScriptedProvider(default_model="openai-codex/gpt-5.3-codex")
     loop = AgentLoop(
         bus=MessageBus(),
         provider=provider,
         workspace=tmp_path,
         session_manager=InMemorySessionManager(),
-        model="openai-codex/gpt-5.2",
+        model="openai-codex/gpt-5.3-codex",
     )
 
     assert not loop.tools.has("web_search")
@@ -89,14 +89,14 @@ def test_codex_model_with_worker_registers_codex_web_search_tool(tmp_path):
     class CodexSDKProvider(ScriptedProvider):
         pass
 
-    provider = ScriptedProvider(default_model="openai-codex/gpt-5.2")
+    provider = ScriptedProvider(default_model="openai-codex/gpt-5.3-codex")
     worker = CodexSDKProvider(default_model="gpt-5.3-codex")
     loop = AgentLoop(
         bus=MessageBus(),
         provider=provider,
         workspace=tmp_path,
         session_manager=InMemorySessionManager(),
-        model="openai-codex/gpt-5.2",
+        model="openai-codex/gpt-5.3-codex",
         subagent_provider=worker,
     )
 
@@ -119,13 +119,13 @@ def test_non_codex_model_registers_nanobot_web_tools(tmp_path):
 
 
 def test_spawn_bridge_mode_hides_direct_tools_for_planner(tmp_path):
-    provider = ScriptedProvider(default_model="openai-codex/gpt-5.2")
+    provider = ScriptedProvider(default_model="openai-codex/gpt-5.3-codex")
     loop = AgentLoop(
         bus=MessageBus(),
         provider=provider,
         workspace=tmp_path,
         session_manager=InMemorySessionManager(),
-        model="openai-codex/gpt-5.2",
+        model="openai-codex/gpt-5.3-codex",
         spawn_bridge_mode=True,
     )
 
@@ -145,7 +145,7 @@ def test_spawn_bridge_mode_hides_direct_tools_for_planner(tmp_path):
 @pytest.mark.asyncio
 async def test_spawn_bridge_mode_retries_when_first_reply_is_refusal(tmp_path):
     provider = ScriptedProvider(
-        default_model="openai-codex/gpt-5.2",
+        default_model="openai-codex/gpt-5.3-codex",
         responses=[
             LLMResponse(content="I can't browse from this environment."),
             LLMResponse(
@@ -168,7 +168,7 @@ async def test_spawn_bridge_mode_retries_when_first_reply_is_refusal(tmp_path):
         provider=provider,
         workspace=tmp_path,
         session_manager=InMemorySessionManager(),
-        model="openai-codex/gpt-5.2",
+        model="openai-codex/gpt-5.3-codex",
         spawn_bridge_mode=True,
         subagent_provider=ReplayProvider("subagent ok"),
     )
@@ -704,7 +704,7 @@ async def test_telegram_reaction_thumbs_up_marks_completed(tmp_path):
     )
     consolidate_calls = []
 
-    async def _fake_consolidate(s, archive_all=False, force=False):
+    async def _fake_consolidate(s, archive_all=False, force=False, model_override=None):
         consolidate_calls.append((s.key, archive_all, force))
 
     loop._consolidate_memory = _fake_consolidate  # type: ignore[method-assign]
@@ -730,6 +730,40 @@ async def test_telegram_reaction_thumbs_up_marks_completed(tmp_path):
     approvals = updated.metadata.get("approved_events")
     assert isinstance(approvals, list) and approvals
     assert approvals[-1]["message_id"] == 10
+
+
+@pytest.mark.asyncio
+async def test_memory_consolidation_uses_effective_model_override(tmp_path):
+    captured_models: list[str | None] = []
+
+    def _capture(messages, _tools, model):
+        captured_models.append(model)
+        return LLMResponse(
+            content='{"history_entry":"[2026-02-15 10:00] Consolidated.","memory_update":"unchanged"}'
+        )
+
+    provider = ScriptedProvider(
+        default_model="openai-codex/gpt-5-codex-mini",
+        responses=[_capture],
+    )
+    manager = InMemorySessionManager()
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=provider,
+        workspace=tmp_path,
+        session_manager=manager,
+        model="openai-codex/gpt-5-codex-mini",
+    )
+
+    session = manager.get_or_create("cli:model-consolidate")
+    session.metadata["model_override"] = "openai-codex/gpt-5.3-codex"
+    session.add_message("user", "Remember this preference.")
+    session.add_message("assistant", "Got it.")
+    manager.save(session)
+
+    await loop._consolidate_memory(session, archive_all=True)
+
+    assert captured_models == ["openai-codex/gpt-5.3-codex"]
 
 
 @pytest.mark.asyncio

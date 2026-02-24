@@ -9,7 +9,7 @@ from click.exceptions import Exit
 
 from nanobot.cli.commands import (
     _build_cron_prompt,
-    _is_gpt52_planner_mode,
+    _is_codex_planner_mode,
     _make_codex_worker_provider,
     _make_provider,
     app,
@@ -132,13 +132,13 @@ def test_make_provider_surfaces_provider_creation_error(monkeypatch):
         _make_provider(cfg)
 
 
-def test_is_gpt52_planner_mode():
+def test_is_codex_planner_mode():
     cfg = Config()
-    cfg.agents.defaults.model = "openai-codex/gpt-5.2"
-    assert _is_gpt52_planner_mode(cfg) is True
+    cfg.agents.defaults.model = "openai-codex/gpt-5.3-codex"
+    assert _is_codex_planner_mode(cfg) is True
 
-    cfg.agents.defaults.model = "openai-codex/gpt-5-codex"
-    assert _is_gpt52_planner_mode(cfg) is False
+    cfg.agents.defaults.model = "anthropic/claude-3-5-haiku"
+    assert _is_codex_planner_mode(cfg) is False
 
 
 def test_make_codex_worker_provider_uses_configured_model(monkeypatch, tmp_path):
@@ -151,7 +151,7 @@ def test_make_codex_worker_provider_uses_configured_model(monkeypatch, tmp_path)
     monkeypatch.setattr("nanobot.providers.codex_sdk_provider.CodexSDKProvider", FakeWorker)
 
     cfg = Config()
-    cfg.agents.defaults.model = "openai-codex/gpt-5.2"
+    cfg.agents.defaults.model = "openai-codex/gpt-5.3-codex"
     cfg.agents.defaults.workspace = str(tmp_path)
     cfg.agents.codex_worker.model = "openai-codex/gpt-5.3-codex"
     cfg.agents.codex_worker.sandbox_mode = "danger-full-access"

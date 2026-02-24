@@ -61,7 +61,7 @@ async def test_compact_command_reduces_session_messages(tmp_path):
         memory_window=20,
     )
 
-    async def _fake_consolidate(_session, archive_all=False, force=False):
+    async def _fake_consolidate(_session, archive_all=False, force=False, model_override=None):
         return None
 
     loop._consolidate_memory = _fake_consolidate  # type: ignore[method-assign]
