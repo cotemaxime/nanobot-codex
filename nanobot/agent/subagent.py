@@ -65,7 +65,7 @@ class SubagentManager:
             for m in (fallback_models or [])
             if isinstance(m, str) and m.strip()
         ]
-        self.heartbeat_interval_seconds = max(5, int(heartbeat_interval_seconds or 30))
+        self.heartbeat_interval_seconds = max(1, int(heartbeat_interval_seconds or 30))
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
     
     async def spawn(
@@ -351,7 +351,13 @@ Then add one optional next step sentence only if action is still needed."""
         try:
             heartbeat_index = 0
             while not bg_task.done():
-                await asyncio.sleep(self._heartbeat_delay_seconds(heartbeat_index))
+                # Allow shorter configured intervals for the first few pings while
+                # keeping the capped backoff schedule in _heartbeat_delay_seconds.
+                delay = min(
+                    self.heartbeat_interval_seconds,
+                    self._heartbeat_delay_seconds(heartbeat_index),
+                )
+                await asyncio.sleep(delay)
                 if bg_task.done():
                     break
                 elapsed_min = max(1, int((time.monotonic() - started_monotonic) // 60))

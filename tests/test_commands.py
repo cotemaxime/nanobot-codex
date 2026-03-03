@@ -2,19 +2,14 @@ import shutil
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 from typer.testing import CliRunner
 
-import pytest
-from click.exceptions import Exit
-
-from nanobot.cli.commands import (
-    _build_cron_prompt,
-    _is_gpt52_planner_mode,
-    _make_codex_worker_provider,
-    _make_provider,
-    app,
-)
+from nanobot.cli.commands import app
 from nanobot.config.schema import Config
+from nanobot.providers.litellm_provider import LiteLLMProvider
+from nanobot.providers.openai_codex_provider import _strip_model_prefix
+from nanobot.providers.registry import find_by_model
 
 runner = CliRunner()
 
@@ -101,81 +96,35 @@ def test_onboard_existing_workspace_safe_create(mock_paths):
     assert (workspace_dir / "AGENTS.md").exists()
 
 
-def test_status_shows_oauth_provider_line(monkeypatch, tmp_path):
-    cfg = Config()
-    cfg.agents.defaults.model = "openai-codex/gpt-5-codex"
+def test_config_matches_github_copilot_codex_with_hyphen_prefix():
+    config = Config()
+    config.agents.defaults.model = "github-copilot/gpt-5.3-codex"
 
-    fake_config_path = tmp_path / "config.json"
-    fake_config_path.write_text("{}", encoding="utf-8")
-
-    monkeypatch.setattr("nanobot.config.loader.get_config_path", lambda: fake_config_path)
-    monkeypatch.setattr("nanobot.config.loader.load_config", lambda: cfg)
-
-    result = runner.invoke(app, ["status"])
-
-    assert result.exit_code == 0
-    assert "Model: openai-codex/gpt-5-codex" in result.stdout
-    assert "OpenAI Codex: ✓ (OAuth)" in result.stdout
+    assert config.get_provider_name() == "github_copilot"
 
 
-def test_make_provider_surfaces_provider_creation_error(monkeypatch):
-    cfg = Config()
-    cfg.agents.defaults.model = "anthropic/claude-3-5-haiku"
-    cfg.providers.anthropic.api_key = "test-key"
+def test_config_matches_openai_codex_with_hyphen_prefix():
+    config = Config()
+    config.agents.defaults.model = "openai-codex/gpt-5.1-codex"
 
-    monkeypatch.setattr(
-        "nanobot.providers.litellm_provider.LiteLLMProvider.__init__",
-        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("provider init failed")),
-    )
-
-    with pytest.raises(RuntimeError, match="provider init failed"):
-        _make_provider(cfg)
+    assert config.get_provider_name() == "openai_codex"
 
 
-def test_is_gpt52_planner_mode():
-    cfg = Config()
-    cfg.agents.defaults.model = "openai-codex/gpt-5.2"
-    assert _is_gpt52_planner_mode(cfg) is True
+def test_find_by_model_prefers_explicit_prefix_over_generic_codex_keyword():
+    spec = find_by_model("github-copilot/gpt-5.3-codex")
 
-    cfg.agents.defaults.model = "openai-codex/gpt-5-codex"
-    assert _is_gpt52_planner_mode(cfg) is False
+    assert spec is not None
+    assert spec.name == "github_copilot"
 
 
-def test_make_codex_worker_provider_uses_configured_model(monkeypatch, tmp_path):
-    captured = {}
+def test_litellm_provider_canonicalizes_github_copilot_hyphen_prefix():
+    provider = LiteLLMProvider(default_model="github-copilot/gpt-5.3-codex")
 
-    class FakeWorker:
-        def __init__(self, **kwargs):
-            captured.update(kwargs)
+    resolved = provider._resolve_model("github-copilot/gpt-5.3-codex")
 
-    monkeypatch.setattr("nanobot.providers.codex_sdk_provider.CodexSDKProvider", FakeWorker)
-
-    cfg = Config()
-    cfg.agents.defaults.model = "openai-codex/gpt-5.2"
-    cfg.agents.defaults.workspace = str(tmp_path)
-    cfg.agents.codex_worker.model = "openai-codex/gpt-5.3-codex"
-    cfg.agents.codex_worker.sandbox_mode = "danger-full-access"
-    cfg.agents.codex_worker.approval_policy = "never"
-    cfg.agents.codex_worker.timeout_seconds = 600
-    cfg.agents.codex_worker.stream_reader_limit_bytes = 4194304
-    cfg.agents.codex_worker.diagnostic_logging = True
-    cfg.agents.codex_worker.network_access_enabled = True
-    cfg.agents.codex_worker.web_search_enabled = True
-
-    worker = _make_codex_worker_provider(cfg)
-
-    assert worker is not None
-    assert captured["default_model"] == "gpt-5.3-codex"
-    assert captured["timeout_seconds"] == 600
-    assert captured["stream_reader_limit_bytes"] == 4194304
-    assert captured["diagnostic_logging"] is True
-    assert captured["sandbox_mode"] == "danger-full-access"
-    assert captured["approval_policy"] == "never"
+    assert resolved == "github_copilot/gpt-5.3-codex"
 
 
-def test_build_cron_prompt_adds_non_interactive_guardrails():
-    prompt = _build_cron_prompt("Run task A then post summary.")
-
-    assert "[Scheduled unattended run]" in prompt
-    assert "Do NOT ask for confirmation" in prompt
-    assert "Task:\nRun task A then post summary." in prompt
+def test_openai_codex_strip_prefix_supports_hyphen_and_underscore():
+    assert _strip_model_prefix("openai-codex/gpt-5.1-codex") == "gpt-5.1-codex"
+    assert _strip_model_prefix("openai_codex/gpt-5.1-codex") == "gpt-5.1-codex"

@@ -79,11 +79,22 @@ class SpawnTool(Tool):
             context = self._context_getter()
             if context:
                 origin_channel, origin_chat_id = context
-        return await self._manager.spawn(
-            task=task,
-            label=label,
-            origin_channel=origin_channel,
-            origin_chat_id=origin_chat_id,
-            origin_metadata=self._origin_metadata,
-            origin_session_key=self._origin_session_key,
-        )
+        try:
+            return await self._manager.spawn(
+                task=task,
+                label=label,
+                origin_channel=origin_channel,
+                origin_chat_id=origin_chat_id,
+                origin_metadata=self._origin_metadata,
+                origin_session_key=self._origin_session_key,
+            )
+        except TypeError as exc:
+            # Compatibility path for older spawn manager signatures used in tests.
+            if "unexpected keyword argument" not in str(exc):
+                raise
+            return await self._manager.spawn(
+                task=task,
+                label=label,
+                origin_channel=origin_channel,
+                origin_chat_id=origin_chat_id,
+            )

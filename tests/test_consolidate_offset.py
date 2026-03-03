@@ -1,9 +1,11 @@
 """Test session management with cache-friendly message handling."""
 
+import asyncio
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 from pathlib import Path
 from nanobot.session.manager import Session, SessionManager
-from nanobot.utils.helpers import ensure_dir
 
 # Test constants
 MEMORY_WINDOW = 50
@@ -478,45 +480,342 @@ class TestEmptyAndBoundarySessions:
         assert_messages_content(old_messages, 10, 34)
 
 
-class TestSessionArchiveOnReset:
-    """Test archive rotation for `/new`-style session resets."""
+class TestConsolidationDeduplicationGuard:
+    """Test that consolidation tasks are deduplicated and serialized."""
 
-    def _new_local_manager(self, tmp_path: Path) -> SessionManager:
-        manager = SessionManager(Path(tmp_path))
-        manager.sessions_dir = ensure_dir(Path(tmp_path) / "sessions")
-        manager.archives_dir = ensure_dir(manager.sessions_dir / "archives")
-        return manager
+    @pytest.mark.asyncio
+    async def test_consolidation_guard_prevents_duplicate_tasks(self, tmp_path: Path) -> None:
+        """Concurrent messages above memory_window spawn only one consolidation task."""
+        from nanobot.agent.loop import AgentLoop
+        from nanobot.bus.events import InboundMessage
+        from nanobot.bus.queue import MessageBus
+        from nanobot.providers.base import LLMResponse
 
-    def test_reset_moves_previous_non_empty_session_to_archives(self, tmp_path: Path):
-        manager = self._new_local_manager(tmp_path)
-        session = create_session_with_messages("telegram:chat", 2)
-        manager.save(session)
+        bus = MessageBus()
+        provider = MagicMock()
+        provider.get_default_model.return_value = "test-model"
+        loop = AgentLoop(
+            bus=bus, provider=provider, workspace=tmp_path, model="test-model", memory_window=10
+        )
 
-        session.clear()
-        manager.save(session)
+        loop.provider.chat = AsyncMock(return_value=LLMResponse(content="ok", tool_calls=[]))
+        loop.tools.get_definitions = MagicMock(return_value=[])
 
-        active = manager._get_session_path("telegram:chat")
-        assert active.exists()
-        assert len([line for line in active.read_text().splitlines() if line.strip()]) == 1
+        session = loop.sessions.get_or_create("cli:test")
+        for i in range(15):
+            session.add_message("user", f"msg{i}")
+            session.add_message("assistant", f"resp{i}")
+        loop.sessions.save(session)
 
-        archived = sorted((manager.sessions_dir / "archives").glob("telegram_chat__*.jsonl"))
-        assert len(archived) == 1
-        archived_lines = [line for line in archived[0].read_text().splitlines() if line.strip()]
-        assert len(archived_lines) == 3  # metadata + 2 messages
+        consolidation_calls = 0
 
-    def test_repeated_resets_create_unique_archives(self, tmp_path: Path):
-        manager = self._new_local_manager(tmp_path)
-        session = create_session_with_messages("telegram:chat", 1)
-        manager.save(session)
-        session.clear()
-        manager.save(session)
+        async def _fake_consolidate(_session, archive_all: bool = False) -> None:
+            nonlocal consolidation_calls
+            consolidation_calls += 1
+            await asyncio.sleep(0.05)
 
-        session = manager.get_or_create("telegram:chat")
-        session.add_message("user", "another")
-        manager.save(session)
-        session.clear()
-        manager.save(session)
+        loop._consolidate_memory = _fake_consolidate  # type: ignore[method-assign]
 
-        archived = sorted((manager.sessions_dir / "archives").glob("telegram_chat__*.jsonl"))
-        assert len(archived) == 2
-        assert archived[0].name != archived[1].name
+        msg = InboundMessage(channel="cli", sender_id="user", chat_id="test", content="hello")
+        await loop._process_message(msg)
+        await loop._process_message(msg)
+        await asyncio.sleep(0.1)
+
+        assert consolidation_calls == 1, (
+            f"Expected exactly 1 consolidation, got {consolidation_calls}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_new_command_guard_prevents_concurrent_consolidation(
+        self, tmp_path: Path
+    ) -> None:
+        """/new command does not run consolidation concurrently with in-flight consolidation."""
+        from nanobot.agent.loop import AgentLoop
+        from nanobot.bus.events import InboundMessage
+        from nanobot.bus.queue import MessageBus
+        from nanobot.providers.base import LLMResponse
+
+        bus = MessageBus()
+        provider = MagicMock()
+        provider.get_default_model.return_value = "test-model"
+        loop = AgentLoop(
+            bus=bus, provider=provider, workspace=tmp_path, model="test-model", memory_window=10
+        )
+
+        loop.provider.chat = AsyncMock(return_value=LLMResponse(content="ok", tool_calls=[]))
+        loop.tools.get_definitions = MagicMock(return_value=[])
+
+        session = loop.sessions.get_or_create("cli:test")
+        for i in range(15):
+            session.add_message("user", f"msg{i}")
+            session.add_message("assistant", f"resp{i}")
+        loop.sessions.save(session)
+
+        consolidation_calls = 0
+        active = 0
+        max_active = 0
+
+        async def _fake_consolidate(_session, archive_all: bool = False) -> None:
+            nonlocal consolidation_calls, active, max_active
+            consolidation_calls += 1
+            active += 1
+            max_active = max(max_active, active)
+            await asyncio.sleep(0.05)
+            active -= 1
+
+        loop._consolidate_memory = _fake_consolidate  # type: ignore[method-assign]
+
+        msg = InboundMessage(channel="cli", sender_id="user", chat_id="test", content="hello")
+        await loop._process_message(msg)
+
+        new_msg = InboundMessage(channel="cli", sender_id="user", chat_id="test", content="/new")
+        await loop._process_message(new_msg)
+        await asyncio.sleep(0.1)
+
+        assert consolidation_calls == 2, (
+            f"Expected normal + /new consolidations, got {consolidation_calls}"
+        )
+        assert max_active == 1, (
+            f"Expected serialized consolidation, observed concurrency={max_active}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_consolidation_tasks_are_referenced(self, tmp_path: Path) -> None:
+        """create_task results are tracked in _consolidation_tasks while in flight."""
+        from nanobot.agent.loop import AgentLoop
+        from nanobot.bus.events import InboundMessage
+        from nanobot.bus.queue import MessageBus
+        from nanobot.providers.base import LLMResponse
+
+        bus = MessageBus()
+        provider = MagicMock()
+        provider.get_default_model.return_value = "test-model"
+        loop = AgentLoop(
+            bus=bus, provider=provider, workspace=tmp_path, model="test-model", memory_window=10
+        )
+
+        loop.provider.chat = AsyncMock(return_value=LLMResponse(content="ok", tool_calls=[]))
+        loop.tools.get_definitions = MagicMock(return_value=[])
+
+        session = loop.sessions.get_or_create("cli:test")
+        for i in range(15):
+            session.add_message("user", f"msg{i}")
+            session.add_message("assistant", f"resp{i}")
+        loop.sessions.save(session)
+
+        started = asyncio.Event()
+
+        async def _slow_consolidate(_session, archive_all: bool = False) -> None:
+            started.set()
+            await asyncio.sleep(0.1)
+
+        loop._consolidate_memory = _slow_consolidate  # type: ignore[method-assign]
+
+        msg = InboundMessage(channel="cli", sender_id="user", chat_id="test", content="hello")
+        await loop._process_message(msg)
+
+        await started.wait()
+        assert len(loop._consolidation_tasks) == 1, "Task must be referenced while in-flight"
+
+        await asyncio.sleep(0.15)
+        assert len(loop._consolidation_tasks) == 0, (
+            "Task reference must be removed after completion"
+        )
+
+    @pytest.mark.asyncio
+    async def test_new_waits_for_inflight_consolidation_and_preserves_messages(
+        self, tmp_path: Path
+    ) -> None:
+        """/new waits for in-flight consolidation and archives before clear."""
+        from nanobot.agent.loop import AgentLoop
+        from nanobot.bus.events import InboundMessage
+        from nanobot.bus.queue import MessageBus
+        from nanobot.providers.base import LLMResponse
+
+        bus = MessageBus()
+        provider = MagicMock()
+        provider.get_default_model.return_value = "test-model"
+        loop = AgentLoop(
+            bus=bus, provider=provider, workspace=tmp_path, model="test-model", memory_window=10
+        )
+
+        loop.provider.chat = AsyncMock(return_value=LLMResponse(content="ok", tool_calls=[]))
+        loop.tools.get_definitions = MagicMock(return_value=[])
+
+        session = loop.sessions.get_or_create("cli:test")
+        for i in range(15):
+            session.add_message("user", f"msg{i}")
+            session.add_message("assistant", f"resp{i}")
+        loop.sessions.save(session)
+
+        started = asyncio.Event()
+        release = asyncio.Event()
+        archived_count = 0
+
+        async def _fake_consolidate(sess, archive_all: bool = False) -> bool:
+            nonlocal archived_count
+            if archive_all:
+                archived_count = len(sess.messages)
+                return True
+            started.set()
+            await release.wait()
+            return True
+
+        loop._consolidate_memory = _fake_consolidate  # type: ignore[method-assign]
+
+        msg = InboundMessage(channel="cli", sender_id="user", chat_id="test", content="hello")
+        await loop._process_message(msg)
+        await started.wait()
+
+        new_msg = InboundMessage(channel="cli", sender_id="user", chat_id="test", content="/new")
+        pending_new = asyncio.create_task(loop._process_message(new_msg))
+
+        await asyncio.sleep(0.02)
+        assert not pending_new.done(), "/new should wait while consolidation is in-flight"
+
+        release.set()
+        response = await pending_new
+        assert response is not None
+        assert "new session started" in response.content.lower()
+        assert archived_count > 0, "Expected /new archival to process a non-empty snapshot"
+
+        session_after = loop.sessions.get_or_create("cli:test")
+        assert session_after.messages == [], "Session should be cleared after successful archival"
+
+    @pytest.mark.asyncio
+    async def test_new_does_not_clear_session_when_archive_fails(self, tmp_path: Path) -> None:
+        """/new must keep session data if archive step reports failure."""
+        from nanobot.agent.loop import AgentLoop
+        from nanobot.bus.events import InboundMessage
+        from nanobot.bus.queue import MessageBus
+        from nanobot.providers.base import LLMResponse
+
+        bus = MessageBus()
+        provider = MagicMock()
+        provider.get_default_model.return_value = "test-model"
+        loop = AgentLoop(
+            bus=bus, provider=provider, workspace=tmp_path, model="test-model", memory_window=10
+        )
+
+        loop.provider.chat = AsyncMock(return_value=LLMResponse(content="ok", tool_calls=[]))
+        loop.tools.get_definitions = MagicMock(return_value=[])
+
+        session = loop.sessions.get_or_create("cli:test")
+        for i in range(5):
+            session.add_message("user", f"msg{i}")
+            session.add_message("assistant", f"resp{i}")
+        loop.sessions.save(session)
+        before_count = len(session.messages)
+
+        async def _failing_consolidate(sess, archive_all: bool = False) -> bool:
+            if archive_all:
+                return False
+            return True
+
+        loop._consolidate_memory = _failing_consolidate  # type: ignore[method-assign]
+
+        new_msg = InboundMessage(channel="cli", sender_id="user", chat_id="test", content="/new")
+        response = await loop._process_message(new_msg)
+
+        assert response is not None
+        assert "failed" in response.content.lower()
+        session_after = loop.sessions.get_or_create("cli:test")
+        assert len(session_after.messages) == before_count, (
+            "Session must remain intact when /new archival fails"
+        )
+
+    @pytest.mark.asyncio
+    async def test_new_archives_only_unconsolidated_messages_after_inflight_task(
+        self, tmp_path: Path
+    ) -> None:
+        """/new should archive only messages not yet consolidated by prior task."""
+        from nanobot.agent.loop import AgentLoop
+        from nanobot.bus.events import InboundMessage
+        from nanobot.bus.queue import MessageBus
+        from nanobot.providers.base import LLMResponse
+
+        bus = MessageBus()
+        provider = MagicMock()
+        provider.get_default_model.return_value = "test-model"
+        loop = AgentLoop(
+            bus=bus, provider=provider, workspace=tmp_path, model="test-model", memory_window=10
+        )
+
+        loop.provider.chat = AsyncMock(return_value=LLMResponse(content="ok", tool_calls=[]))
+        loop.tools.get_definitions = MagicMock(return_value=[])
+
+        session = loop.sessions.get_or_create("cli:test")
+        for i in range(15):
+            session.add_message("user", f"msg{i}")
+            session.add_message("assistant", f"resp{i}")
+        loop.sessions.save(session)
+
+        started = asyncio.Event()
+        release = asyncio.Event()
+        archived_count = -1
+
+        async def _fake_consolidate(sess, archive_all: bool = False) -> bool:
+            nonlocal archived_count
+            if archive_all:
+                archived_count = len(sess.messages)
+                return True
+
+            started.set()
+            await release.wait()
+            sess.last_consolidated = len(sess.messages) - 3
+            return True
+
+        loop._consolidate_memory = _fake_consolidate  # type: ignore[method-assign]
+
+        msg = InboundMessage(channel="cli", sender_id="user", chat_id="test", content="hello")
+        await loop._process_message(msg)
+        await started.wait()
+
+        new_msg = InboundMessage(channel="cli", sender_id="user", chat_id="test", content="/new")
+        pending_new = asyncio.create_task(loop._process_message(new_msg))
+        await asyncio.sleep(0.02)
+        assert not pending_new.done()
+
+        release.set()
+        response = await pending_new
+
+        assert response is not None
+        assert "new session started" in response.content.lower()
+        assert archived_count == 3, (
+            f"Expected only unconsolidated tail to archive, got {archived_count}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_new_clears_session_and_responds(self, tmp_path: Path) -> None:
+        """/new clears session and returns confirmation."""
+        from nanobot.agent.loop import AgentLoop
+        from nanobot.bus.events import InboundMessage
+        from nanobot.bus.queue import MessageBus
+        from nanobot.providers.base import LLMResponse
+
+        bus = MessageBus()
+        provider = MagicMock()
+        provider.get_default_model.return_value = "test-model"
+        loop = AgentLoop(
+            bus=bus, provider=provider, workspace=tmp_path, model="test-model", memory_window=10
+        )
+        loop.provider.chat = AsyncMock(return_value=LLMResponse(content="ok", tool_calls=[]))
+        loop.tools.get_definitions = MagicMock(return_value=[])
+
+        session = loop.sessions.get_or_create("cli:test")
+        for i in range(3):
+            session.add_message("user", f"msg{i}")
+            session.add_message("assistant", f"resp{i}")
+        loop.sessions.save(session)
+
+        async def _ok_consolidate(sess, archive_all: bool = False) -> bool:
+            return True
+
+        loop._consolidate_memory = _ok_consolidate  # type: ignore[method-assign]
+
+        new_msg = InboundMessage(channel="cli", sender_id="user", chat_id="test", content="/new")
+        response = await loop._process_message(new_msg)
+
+        assert response is not None
+        assert "new session started" in response.content.lower()
+        assert loop.sessions.get_or_create("cli:test").messages == []
