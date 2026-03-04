@@ -320,7 +320,7 @@ def _make_provider(config: Config):
         worker_cfg = config.agents.codex_worker
         sdk_model = _normalize_sdk_model_name(model) or _normalize_sdk_model_name(worker_cfg.model) or "gpt-5.3-codex"
         try:
-            return CodexSDKProvider(
+            provider = CodexSDKProvider(
                 default_model=sdk_model,
                 workspace=str(config.workspace_path),
                 timeout_seconds=worker_cfg.timeout_seconds,
@@ -331,8 +331,16 @@ def _make_provider(config: Config):
                 stream_reader_limit_bytes=worker_cfg.stream_reader_limit_bytes,
                 diagnostic_logging=worker_cfg.diagnostic_logging,
             )
+            logger.info(
+                "Provider selected: codex-sdk (model={}, sandbox_mode={}, approval_policy={})",
+                sdk_model,
+                worker_cfg.sandbox_mode,
+                worker_cfg.approval_policy,
+            )
+            return provider
         except Exception as e:
             logger.warning(f"Codex SDK provider unavailable, falling back to HTTP bridge: {e}")
+            logger.info("Provider selected: codex-http-bridge (model={})", model)
             return OpenAICodexProvider(default_model=model)
 
     # Custom: direct OpenAI-compatible endpoint, bypasses LiteLLM
