@@ -37,7 +37,7 @@ class CodexSDKProvider(LLMProvider):
         diagnostic_logging: bool = False,
     ):
         super().__init__(api_key=None, api_base=None)
-        self.default_model = default_model
+        self.default_model = self._normalize_model_name(default_model)
         self.profile = profile
         self.workspace = workspace
         self.timeout_seconds = timeout_seconds
@@ -90,7 +90,7 @@ class CodexSDKProvider(LLMProvider):
     ) -> LLMResponse:
         trace_id = uuid4().hex[:8]
         started = time.monotonic()
-        model_name = model or self.default_model
+        model_name = self._normalize_model_name(model) if model else self.default_model
         if self.diagnostic_logging:
             logger.info(
                 f"[codex-provider:{trace_id}] chat start model={model_name} "
@@ -113,7 +113,7 @@ class CodexSDKProvider(LLMProvider):
                 response = await self.transport.chat(
                     messages=run_messages,
                     tools=all_defs,
-                    model=model or self.default_model,
+                    model=model_name,
                     max_tokens=max(1, max_tokens),
                     temperature=temperature,
                 )
@@ -218,6 +218,14 @@ class CodexSDKProvider(LLMProvider):
                     f"[codex-provider:{trace_id}] chat failed model={model_name} elapsed_ms={elapsed_ms}: {e}"
                 )
             return LLMResponse(content=f"Error calling Codex: {e}", finish_reason="error")
+
+    @staticmethod
+    def _normalize_model_name(model: str) -> str:
+        """Normalize legacy provider-prefixed codex ids to raw SDK model ids."""
+        cleaned = (model or "").strip()
+        if cleaned.lower().startswith("openai-codex/"):
+            return cleaned.split("/", 1)[1]
+        return cleaned
 
     def _split_tool_definitions(
         self, tools: list[dict[str, Any]]
