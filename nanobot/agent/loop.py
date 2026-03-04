@@ -574,6 +574,10 @@ class AgentLoop:
         while iteration < self.max_iterations:
             iteration += 1
             current_model = self._active_model_ctx.get() or model or self.model
+            if on_progress and self.provider.__class__.__name__ == "CodexSDKProvider":
+                await on_progress(
+                    f"Thinking with Codex SDK (step {iteration}/{self.max_iterations})..."
+                )
 
             response = await self.provider.chat(
                 messages=messages,

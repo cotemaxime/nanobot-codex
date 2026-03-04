@@ -339,8 +339,17 @@ class TelegramChannel(BaseChannel):
                 logger.error(f"Error sending Telegram progress message: {e}")
             return
 
-        # Non-progress reply: stop reusing prior progress message for this thread.
-        self._progress_message_ids.pop(progress_key, None)
+        # Non-progress reply: stop reusing and delete prior progress message for this thread.
+        stale_progress_message_id = self._progress_message_ids.pop(progress_key, None)
+        if stale_progress_message_id is not None:
+            try:
+                await self._app.bot.delete_message(
+                    chat_id=chat_id,
+                    message_id=stale_progress_message_id,
+                )
+            except Exception:
+                # If deletion fails, continue with the normal reply.
+                pass
 
         # Send media files
         for media_path in (msg.media or []):

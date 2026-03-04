@@ -266,6 +266,7 @@ class DummyBot:
     def __init__(self):
         self.sent = []
         self.edited = []
+        self.deleted = []
         self._next_id = 100
 
     async def send_message(self, **kwargs):
@@ -277,6 +278,10 @@ class DummyBot:
     async def edit_message_text(self, **kwargs):
         self.edited.append(kwargs)
         return SimpleNamespace(message_id=kwargs.get("message_id"))
+
+    async def delete_message(self, **kwargs):
+        self.deleted.append(kwargs)
+        return True
 
 
 @pytest.mark.asyncio
@@ -389,6 +394,9 @@ async def test_normal_reply_clears_progress_tracking():
     ))
 
     assert (123, 99) not in channel._progress_message_ids
+    assert channel._app.bot.deleted
+    assert channel._app.bot.deleted[0]["chat_id"] == 123
+    assert channel._app.bot.deleted[0]["message_id"] == 100
 
 
 @pytest.mark.asyncio

@@ -275,6 +275,42 @@ async def test_progress_callback_uses_tool_hint_not_model_narration(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_codex_sdk_progress_callback_emits_thinking_status(tmp_path):
+    class CodexSDKProvider(ScriptedProvider):
+        pass
+
+    provider = CodexSDKProvider(
+        default_model="gpt-5.3-codex",
+        responses=[LLMResponse(content="done")],
+    )
+
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=provider,
+        workspace=tmp_path,
+        session_manager=InMemorySessionManager(),
+        model="openai-codex/gpt-5.3-codex",
+    )
+
+    progress_updates: list[str] = []
+
+    async def _progress(text: str) -> None:
+        progress_updates.append(text)
+
+    response = await loop.process_direct(
+        "status check",
+        session_key="cli:test-codex-progress",
+        channel="cli",
+        chat_id="test-codex-progress",
+        on_progress=_progress,
+    )
+
+    assert response == "done"
+    assert progress_updates
+    assert progress_updates[0].startswith("Thinking with Codex SDK")
+
+
+@pytest.mark.asyncio
 async def test_default_bus_progress_streams_with_explicit_prefix(tmp_path):
     f = tmp_path / "note.txt"
     f.write_text("tool output", encoding="utf-8")
