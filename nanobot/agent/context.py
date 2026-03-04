@@ -19,6 +19,7 @@ class ContextBuilder:
     """
     
     BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md"]
+    _RUNTIME_CONTEXT_TAG = "[runtime-context]"
     
     def __init__(self, workspace: Path, disabled_skills: list[str] | None = None):
         self.workspace = workspace
@@ -72,10 +73,6 @@ Skills with available="false" need dependencies installed first - you can try in
     
     def _get_identity(self) -> str:
         """Get the core identity section."""
-        from datetime import datetime
-        import time as _time
-        now = datetime.now().strftime("%Y-%m-%d %H:%M (%A)")
-        tz = _time.strftime("%Z") or "UTC"
         workspace_path = str(self.workspace.expanduser().resolve())
         system = platform.system()
         runtime = f"{'macOS' if system == 'Darwin' else system} {platform.machine()}, Python {platform.python_version()}"
@@ -90,9 +87,6 @@ Skills with available="false" need dependencies installed first - you can try in
 - Send messages to users on chat channels
 - Spawn subagents for complex background tasks
 - Switch model for this request or chat/topic when needed
-
-## Current Time
-{now} ({tz})
 
 ## Runtime
 {runtime}
@@ -174,18 +168,37 @@ To recall past events, grep {workspace_path}/memory/HISTORY.md"""
 
         # System prompt
         system_prompt = self.build_system_prompt(skill_names)
-        if channel and chat_id:
-            system_prompt += f"\n\n## Current Session\nChannel: {channel}\nChat ID: {chat_id}"
         messages.append({"role": "system", "content": system_prompt})
 
         # History
         messages.extend(history)
+
+        runtime_context = self._build_runtime_context(channel=channel, chat_id=chat_id)
+        if runtime_context:
+            messages.append({"role": "user", "content": runtime_context})
 
         # Current message (with optional image attachments)
         user_content = self._build_user_content(current_message, media)
         messages.append({"role": "user", "content": user_content})
 
         return messages
+
+    def _build_runtime_context(self, channel: str | None, chat_id: str | None) -> str:
+        """Build non-authoritative runtime metadata as a separate user message."""
+        from datetime import datetime
+        import time as _time
+
+        now = datetime.now().strftime("%Y-%m-%d %H:%M (%A)")
+        tz = _time.strftime("%Z") or "UTC"
+        lines = [
+            self._RUNTIME_CONTEXT_TAG,
+            f"Current Time: {now} ({tz})",
+        ]
+        if channel:
+            lines.append(f"Channel: {channel}")
+        if chat_id:
+            lines.append(f"Chat ID: {chat_id}")
+        return "\n".join(lines)
 
     def _build_user_content(self, text: str, media: list[str] | None) -> str | list[dict[str, Any]]:
         """Build user message content with optional base64-encoded images."""

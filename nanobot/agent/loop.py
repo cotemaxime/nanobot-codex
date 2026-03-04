@@ -100,6 +100,40 @@ class AgentLoop:
             return f"openai-codex/{cleaned}"
         return cleaned
 
+    def _save_turn(self, session: Session, messages: list[dict[str, Any]], skip: int = 0) -> None:
+        """Persist selected messages to a session, stripping runtime-context scaffolding."""
+        runtime_tag = ContextBuilder._RUNTIME_CONTEXT_TAG
+
+        for msg in messages[skip:]:
+            role = msg.get("role")
+            if role not in {"user", "assistant", "tool"}:
+                continue
+
+            content = msg.get("content")
+            if isinstance(content, str):
+                if role == "user" and content.startswith(runtime_tag):
+                    continue
+                session.add_message(role, content)
+                continue
+
+            if isinstance(content, list):
+                normalized: list[dict[str, str]] = []
+                for item in content:
+                    if not isinstance(item, dict):
+                        continue
+                    item_type = item.get("type")
+                    if item_type in {"text", "input_text", "output_text"}:
+                        text = str(item.get("text", ""))
+                        if role == "user" and text.startswith(runtime_tag):
+                            continue
+                        normalized.append({"type": "text", "text": text})
+                    elif item_type in {"image_url", "input_image", "output_image"}:
+                        normalized.append({"type": "text", "text": "[image]"})
+
+                if not normalized:
+                    continue
+                session.add_message(role, normalized)  # type: ignore[arg-type]
+
     def __init__(
         self,
         bus: MessageBus,
