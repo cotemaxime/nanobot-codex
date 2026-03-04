@@ -1,6 +1,7 @@
 """Agent loop: the core processing engine."""
 
 import asyncio
+import itertools
 from contextvars import ContextVar, Token
 from contextlib import AsyncExitStack
 from datetime import datetime
@@ -73,6 +74,7 @@ class AgentLoop:
     )
     DEFAULT_CONTEXT_LIMIT_TOKENS = 128_000
     DEFAULT_CONTEXT_WARNING_THRESHOLD = 0.75
+    _CODEX_PROGRESS_INTERVAL_SECONDS = (60, 60, 120, 120, 240, 240, 360, 360, 480, 480, 600)
     CORE_SLASH_COMMANDS = {"start", "new", "help", "last", "skills", "skill", "model", "compact"}
 
     
@@ -574,18 +576,35 @@ class AgentLoop:
         while iteration < self.max_iterations:
             iteration += 1
             current_model = self._active_model_ctx.get() or model or self.model
+            progress_stop: asyncio.Event | None = None
+            progress_task: asyncio.Task | None = None
             if on_progress and self.provider.__class__.__name__ == "CodexSDKProvider":
-                await on_progress(
-                    f"Thinking with Codex SDK (step {iteration}/{self.max_iterations})..."
+                progress_stop = asyncio.Event()
+                progress_task = asyncio.create_task(
+                    self._run_codex_progress_heartbeat(
+                        on_progress=on_progress,
+                        step=iteration,
+                        max_steps=self.max_iterations,
+                        stop_event=progress_stop,
+                    )
                 )
 
-            response = await self.provider.chat(
-                messages=messages,
-                tools=self.tools.get_definitions(),
-                model=current_model,
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
-            )
+            try:
+                response = await self.provider.chat(
+                    messages=messages,
+                    tools=self.tools.get_definitions(),
+                    model=current_model,
+                    temperature=self.temperature,
+                    max_tokens=self.max_tokens,
+                )
+            finally:
+                if progress_stop is not None:
+                    progress_stop.set()
+                if progress_task is not None:
+                    try:
+                        await progress_task
+                    except Exception:
+                        logger.debug("Codex progress heartbeat task ended with error", exc_info=True)
 
             if response.has_tool_calls:
                 if on_progress:
@@ -623,6 +642,39 @@ class AgentLoop:
                 break
 
         return final_content, tools_used
+
+    @classmethod
+    def _codex_progress_intervals_seconds(cls) -> itertools.chain:
+        """Yield codex status update intervals (seconds): ramp to 10m then stay at 10m."""
+        return itertools.chain(cls._CODEX_PROGRESS_INTERVAL_SECONDS, itertools.repeat(600))
+
+    async def _run_codex_progress_heartbeat(
+        self,
+        on_progress: Callable[[str], Awaitable[None]],
+        step: int,
+        max_steps: int,
+        stop_event: asyncio.Event,
+    ) -> None:
+        """Emit paced progress updates while an SDK call is running."""
+        elapsed_seconds = 0
+        try:
+            await on_progress(f"Thinking with Codex SDK (step {step}/{max_steps})...")
+        except Exception:
+            return
+
+        for interval in self._codex_progress_intervals_seconds():
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=interval)
+                return
+            except asyncio.TimeoutError:
+                elapsed_seconds += interval
+                minutes = elapsed_seconds // 60
+                try:
+                    await on_progress(
+                        f"Still working with Codex SDK ({minutes}m elapsed, step {step}/{max_steps})..."
+                    )
+                except Exception:
+                    return
 
     def _set_model_from_tool(self, action: str, model: str | None, persist: bool) -> str:
         """Apply model switch requested via set_model tool."""

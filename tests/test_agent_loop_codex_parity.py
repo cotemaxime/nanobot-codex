@@ -400,6 +400,14 @@ def test_system_prompt_includes_execution_honesty_guardrails(tmp_path):
     assert "Use the spawn tool only when the user explicitly asks" in prompt
 
 
+def test_codex_progress_intervals_ramp_then_hold():
+    intervals = AgentLoop._codex_progress_intervals_seconds()
+    first_twelve = [next(intervals) for _ in range(12)]
+    assert first_twelve == [60, 60, 120, 120, 240, 240, 360, 360, 480, 480, 600, 600]
+    assert next(intervals) == 600
+    assert next(intervals) == 600
+
+
 @pytest.mark.asyncio
 async def test_memory_consolidation_json_contract_still_works(tmp_path):
     provider = ScriptedProvider(
