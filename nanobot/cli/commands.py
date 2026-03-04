@@ -216,8 +216,9 @@ You are a helpful AI assistant. Be concise, accurate, and friendly.
 
 ## Guidelines
 
-- Always explain what you're doing before taking actions
 - Ask for clarification when the request is ambiguous
+- For routine, low-risk tool actions, execute directly; do not wait for confirmation
+- Ask for confirmation only for high-risk, irreversible, destructive, public-facing, or privacy-sensitive actions
 - Use tools to help accomplish tasks
 - Remember important information in memory/MEMORY.md; past events are logged in memory/HISTORY.md
 """,

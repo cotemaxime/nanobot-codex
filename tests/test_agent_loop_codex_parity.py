@@ -360,6 +360,7 @@ def test_system_prompt_includes_execution_honesty_guardrails(tmp_path):
 
     prompt = loop.context.build_system_prompt()
     assert "Never claim you executed commands" in prompt
+    assert "execute directly without asking for confirmation first" in prompt
     assert "Use the spawn tool only when the user explicitly asks" in prompt
 
 
