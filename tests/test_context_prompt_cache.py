@@ -64,3 +64,18 @@ def test_runtime_context_is_separate_untrusted_user_message(tmp_path) -> None:
 
     assert messages[-1]["role"] == "user"
     assert messages[-1]["content"] == "Return exactly: OK"
+
+
+def test_identity_md_only_overrides_single_identity_line(tmp_path) -> None:
+    workspace = _make_workspace(tmp_path)
+    (workspace / "IDENTITY.md").write_text(
+        "# Identity\n\nYou are nanobot, a coding assistant.\n\nThis paragraph must not be injected.",
+        encoding="utf-8",
+    )
+
+    builder = ContextBuilder(workspace)
+    prompt = builder.build_system_prompt()
+
+    assert "You are nanobot, a coding assistant. You have access to tools that allow you to:" in prompt
+    assert "## IDENTITY.md" not in prompt
+    assert "This paragraph must not be injected." not in prompt

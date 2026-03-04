@@ -18,7 +18,7 @@ class ContextBuilder:
     into a coherent prompt for the LLM.
     """
     
-    BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md", "IDENTITY.md"]
+    BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md"]
     
     def __init__(self, workspace: Path, disabled_skills: list[str] | None = None):
         self.workspace = workspace
@@ -79,10 +79,11 @@ Skills with available="false" need dependencies installed first - you can try in
         workspace_path = str(self.workspace.expanduser().resolve())
         system = platform.system()
         runtime = f"{'macOS' if system == 'Darwin' else system} {platform.machine()}, Python {platform.python_version()}"
+        identity_line = self._load_identity_line()
         
         return f"""# nanobot 🐈
 
-You are nanobot, a helpful AI assistant. You have access to tools that allow you to:
+{identity_line} You have access to tools that allow you to:
 - Read, write, and edit files
 - Execute shell commands
 - Search the web and fetch web pages
@@ -112,6 +113,27 @@ If you plan to use tools, keep wording tentative (for example: "I'll check") and
 Use the spawn tool only when the user explicitly asks for background/asynchronous work.
 When remembering something important, write to {workspace_path}/memory/MEMORY.md
 To recall past events, grep {workspace_path}/memory/HISTORY.md"""
+
+    def _load_identity_line(self) -> str:
+        """Load a one-line identity override from IDENTITY.md when present."""
+        default_identity = "You are nanobot, a helpful AI assistant."
+        file_path = self.workspace / "IDENTITY.md"
+        if not file_path.exists():
+            return default_identity
+
+        try:
+            content = file_path.read_text(encoding="utf-8")
+        except OSError:
+            return default_identity
+
+        for raw_line in content.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            normalized = " ".join(line.split())
+            return normalized
+
+        return default_identity
     
     def _load_bootstrap_files(self) -> str:
         """Load all bootstrap files from workspace."""

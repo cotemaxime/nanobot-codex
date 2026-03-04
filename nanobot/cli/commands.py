@@ -539,13 +539,15 @@ def gateway(
     cron.on_job = on_cron_job
     
     # Create heartbeat service
-    async def on_heartbeat(prompt: str) -> str:
+    async def on_heartbeat_execute(tasks: str) -> str:
         """Execute heartbeat through the agent."""
-        return await agent.process_direct(prompt, session_key="heartbeat")
-    
+        return await agent.process_direct(tasks, session_key="heartbeat")
+
     heartbeat = HeartbeatService(
         workspace=config.workspace_path,
-        on_heartbeat=on_heartbeat,
+        provider=provider,
+        model=config.agents.defaults.model,
+        on_execute=on_heartbeat_execute,
         interval_s=30 * 60,  # 30 minutes
         enabled=True
     )
