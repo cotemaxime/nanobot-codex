@@ -234,6 +234,34 @@ async def test_forward_command_falls_back_to_sender_last_topic_thread():
     assert captured["metadata"]["session_key"] == "telegram:123:99"
 
 
+@pytest.mark.asyncio
+async def test_forward_command_falls_back_to_bare_sender_topic_thread():
+    channel = _make_channel()
+    captured = {}
+
+    async def _capture(**kwargs):
+        captured.update(kwargs)
+
+    channel._handle_message = _capture  # type: ignore[method-assign]
+    # Stored from a previous event where sender id did not include username.
+    channel._sender_topic_threads[("7", "123")] = 99
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=7, username="alice"),
+        message=SimpleNamespace(
+            chat_id=123,
+            message_id=58,
+            message_thread_id=None,
+            reply_to_message=None,
+            text="/model",
+        ),
+    )
+
+    await channel._forward_command(update, None)
+
+    assert captured["metadata"]["telegram"]["message_thread_id"] == 99
+    assert captured["metadata"]["session_key"] == "telegram:123:99"
+
+
 class DummyBot:
     def __init__(self):
         self.sent = []
@@ -361,3 +389,20 @@ async def test_normal_reply_clears_progress_tracking():
     ))
 
     assert (123, 99) not in channel._progress_message_ids
+
+
+@pytest.mark.asyncio
+async def test_send_uses_session_key_thread_when_telegram_metadata_missing():
+    channel = TelegramChannel(config=TelegramConfig(), bus=MessageBus())
+    channel._app = SimpleNamespace(bot=DummyBot())
+
+    await channel.send(OutboundMessage(
+        channel="telegram",
+        chat_id="123",
+        content="Model menu",
+        metadata={"session_key": "telegram:123:99"},
+    ))
+
+    assert channel._app.bot.sent
+    sent = channel._app.bot.sent[-1]
+    assert sent["message_thread_id"] == 99

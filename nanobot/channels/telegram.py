@@ -167,6 +167,7 @@ class TelegramChannel(BaseChannel):
         self._reaction_handler_mode: str = "none"  # none | filters | fallback
         self._message_thread_ids: dict[tuple[str, int], int] = {}  # (chat_id, message_id) -> thread_id
         self._sender_topic_threads: dict[tuple[str, str], int] = {}  # (sender_id, chat_id) -> last thread_id
+        self._chat_topic_threads: dict[str, int] = {}  # chat_id -> last observed thread_id
         self._progress_message_ids: dict[tuple[int, int | None], int] = {}  # (chat_id, thread_id) -> message_id
     
     async def start(self) -> None:
@@ -289,8 +290,7 @@ class TelegramChannel(BaseChannel):
 
         try:
             chat_id = int(msg.chat_id)
-            telegram_meta = (msg.metadata or {}).get("telegram", {})
-            thread_id = telegram_meta.get("message_thread_id")
+            thread_id = self._resolve_outbound_thread_id(msg.metadata or {}, chat_id)
         except ValueError:
             logger.error(f"Invalid chat_id: {msg.chat_id}")
             return
@@ -443,9 +443,11 @@ class TelegramChannel(BaseChannel):
             return
         sender_id = self._sender_id(update.effective_user)
         chat_id = str(update.message.chat_id)
-        thread_id = self._resolve_incoming_thread_id(update.message)
-        if thread_id is None:
-            thread_id = self._sender_topic_threads.get((sender_id, chat_id))
+        thread_id = self._resolve_command_thread_id(
+            message=update.message,
+            sender_id=sender_id,
+            chat_id=chat_id,
+        )
         self._remember_sender_thread(sender_id, chat_id, thread_id)
         self._remember_message_thread(
             chat_id=update.message.chat_id,
@@ -626,9 +628,59 @@ class TelegramChannel(BaseChannel):
         if tid is None:
             return
         self._sender_topic_threads[(sender_id, chat_id)] = tid
+        bare_sender = sender_id.split("|", 1)[0]
+        self._sender_topic_threads[(bare_sender, chat_id)] = tid
+        self._chat_topic_threads[chat_id] = tid
         if len(self._sender_topic_threads) > 5000:
             oldest = next(iter(self._sender_topic_threads))
             self._sender_topic_threads.pop(oldest, None)
+        if len(self._chat_topic_threads) > 5000:
+            oldest_chat = next(iter(self._chat_topic_threads))
+            self._chat_topic_threads.pop(oldest_chat, None)
+
+    def _resolve_command_thread_id(self, message: Any, sender_id: str, chat_id: str) -> int | None:
+        """Resolve thread id for command updates with multiple fallbacks."""
+        thread_id = self._resolve_incoming_thread_id(message)
+        if thread_id is not None:
+            return thread_id
+
+        reply_to = getattr(message, "reply_to_message", None)
+        if reply_to is not None:
+            thread_id = self._resolve_message_thread(
+                chat_id=chat_id,
+                message_id=getattr(reply_to, "message_id", None),
+                explicit_thread_id=getattr(reply_to, "message_thread_id", None),
+            )
+            if thread_id is not None:
+                return thread_id
+
+        thread_id = self._sender_topic_threads.get((sender_id, chat_id))
+        if thread_id is not None:
+            return thread_id
+
+        bare_sender = sender_id.split("|", 1)[0]
+        thread_id = self._sender_topic_threads.get((bare_sender, chat_id))
+        if thread_id is not None:
+            return thread_id
+
+        return self._chat_topic_threads.get(chat_id)
+
+    def _resolve_outbound_thread_id(self, metadata: dict[str, Any], chat_id: int) -> int | None:
+        """Resolve outbound Telegram thread from metadata, then session key, then chat fallback."""
+        telegram_meta = metadata.get("telegram", {}) if isinstance(metadata, dict) else {}
+        explicit = self._as_int(telegram_meta.get("message_thread_id"))
+        if explicit is not None:
+            return explicit
+
+        session_key = metadata.get("session_key") if isinstance(metadata, dict) else None
+        if isinstance(session_key, str):
+            parts = session_key.split(":")
+            if len(parts) >= 3:
+                parsed = self._as_int(parts[-1])
+                if parsed is not None:
+                    return parsed
+
+        return self._chat_topic_threads.get(str(chat_id))
 
     async def _on_reaction(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle Telegram message reaction updates."""
