@@ -244,6 +244,7 @@ class ProvidersConfig(Base):
     siliconflow: ProviderConfig = Field(default_factory=ProviderConfig)  # SiliconFlow (硅基流动) API gateway
     openai_codex: ProviderConfig = Field(default_factory=ProviderConfig)  # OpenAI Codex (OAuth)
     github_copilot: ProviderConfig = Field(default_factory=ProviderConfig)  # Github Copilot (OAuth)
+    claude_agent: ProviderConfig = Field(default_factory=ProviderConfig)  # Claude Agent SDK (local SDK auth)
 
 
 class GatewayConfig(Base):

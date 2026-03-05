@@ -306,6 +306,7 @@ This file stores important information that should persist across sessions.
 def _make_provider(config: Config):
     """Create the appropriate LLM provider from config."""
     from loguru import logger
+    from nanobot.providers.claude_agent_sdk_provider import ClaudeAgentSDKProvider
     from nanobot.providers.codex_sdk_provider import CodexSDKProvider
     from nanobot.providers.litellm_provider import LiteLLMProvider
     from nanobot.providers.openai_codex_provider import OpenAICodexProvider
@@ -342,6 +343,25 @@ def _make_provider(config: Config):
             logger.warning(f"Codex SDK provider unavailable, falling back to HTTP bridge: {e}")
             logger.info("Provider selected: codex-http-bridge (model={})", model)
             return OpenAICodexProvider(default_model=model)
+
+    # Claude Agent SDK (OAuth/session-style local auth)
+    if provider_name == "claude_agent" or model.startswith("claude-agent/"):
+        worker_cfg = config.agents.codex_worker
+        claude_model = _normalize_claude_agent_model(model) or "claude-sonnet-4-5"
+        try:
+            provider = ClaudeAgentSDKProvider(
+                default_model=claude_model,
+                workspace=str(config.workspace_path),
+                timeout_seconds=worker_cfg.timeout_seconds,
+                max_turns=max(4, config.agents.defaults.max_tool_iterations),
+                permission_mode="acceptEdits",
+                strict_auth=False,
+            )
+            logger.info("Provider selected: claude-agent-sdk (model={})", claude_model)
+            return provider
+        except Exception as e:
+            logger.error(f"Claude Agent SDK provider unavailable: {e}")
+            raise typer.Exit(1)
 
     # Custom: direct OpenAI-compatible endpoint, bypasses LiteLLM
     if provider_name == "custom":
@@ -411,6 +431,14 @@ def _normalize_chat_model_name(model: str) -> str:
         return cleaned
     if cleaned.startswith("gpt-") and "codex" in cleaned:
         return f"openai-codex/{cleaned}"
+    return cleaned
+
+
+def _normalize_claude_agent_model(model: str) -> str:
+    """Normalize claude-agent/<model> ids to raw Claude model ids."""
+    cleaned = (model or "").strip()
+    if cleaned.lower().startswith("claude-agent/"):
+        return cleaned.split("/", 1)[1]
     return cleaned
 
 
@@ -1213,6 +1241,25 @@ def _login_github_copilot() -> None:
     except Exception as e:
         console.print(f"[red]Authentication error: {e}[/red]")
         raise typer.Exit(1)
+
+
+@_register_login("claude_agent")
+def _login_claude_agent() -> None:
+    import shutil
+
+    claude_bin = shutil.which("claude")
+    if not claude_bin:
+        console.print(
+            "[yellow]Claude CLI not found on PATH.[/yellow]\n"
+            "Install/auth Claude Code first, then retry."
+        )
+        raise typer.Exit(1)
+
+    console.print(
+        "[cyan]Claude Agent SDK uses your local Claude auth context.[/cyan]\n"
+        f"Detected CLI: [dim]{claude_bin}[/dim]\n"
+        "Run `claude login` if needed, then start nanobot with a `claude-agent/<model>` model."
+    )
 
 
 if __name__ == "__main__":

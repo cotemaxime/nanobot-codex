@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from loguru import logger
 
+from nanobot.providers.claude_agent_sdk_provider import ClaudeAgentSDKProvider
 from nanobot.providers.codex_sdk_provider import CodexSDKProvider
 from nanobot.providers.custom_provider import CustomProvider
 from nanobot.providers.litellm_provider import LiteLLMProvider
@@ -14,6 +15,13 @@ def _normalize_sdk_model_name(model: str) -> str:
     """Normalize model id for Codex SDK (uses raw ids like gpt-5-codex)."""
     cleaned = (model or "").strip()
     if cleaned.lower().startswith("openai-codex/"):
+        return cleaned.split("/", 1)[1]
+    return cleaned
+
+
+def _normalize_claude_agent_model(model: str) -> str:
+    cleaned = (model or "").strip()
+    if cleaned.lower().startswith("claude-agent/"):
         return cleaned.split("/", 1)[1]
     return cleaned
 
@@ -51,6 +59,23 @@ def create_provider(config):
             logger.warning(f"Codex SDK provider unavailable, falling back to HTTP bridge: {e}")
             logger.info("Provider selected: codex-http-bridge (model={})", model)
             return OpenAICodexProvider(default_model=model)
+
+    if provider_name == "claude_agent" or model.startswith("claude-agent/"):
+        worker_cfg = config.agents.codex_worker
+        claude_model = _normalize_claude_agent_model(model) or "claude-sonnet-4-5"
+        try:
+            provider = ClaudeAgentSDKProvider(
+                default_model=claude_model,
+                workspace=str(config.workspace_path),
+                timeout_seconds=worker_cfg.timeout_seconds,
+                max_turns=max(4, config.agents.defaults.max_tool_iterations),
+                permission_mode="acceptEdits",
+                strict_auth=False,
+            )
+            logger.info("Provider selected: claude-agent-sdk (model={})", claude_model)
+            return provider
+        except Exception as e:
+            raise RuntimeError(f"Claude Agent SDK provider unavailable: {e}") from e
 
     # Custom: direct OpenAI-compatible endpoint, bypasses LiteLLM
     if provider_name == "custom":

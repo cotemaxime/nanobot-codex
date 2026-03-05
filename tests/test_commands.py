@@ -6,6 +6,7 @@ import pytest
 from typer.testing import CliRunner
 
 from nanobot.cli.commands import app
+from nanobot.cli.commands import _normalize_claude_agent_model
 from nanobot.config.schema import Config
 from nanobot.providers.litellm_provider import LiteLLMProvider
 from nanobot.providers.openai_codex_provider import _strip_model_prefix
@@ -110,6 +111,13 @@ def test_config_matches_openai_codex_with_hyphen_prefix():
     assert config.get_provider_name() == "openai_codex"
 
 
+def test_config_matches_claude_agent_with_hyphen_prefix():
+    config = Config()
+    config.agents.defaults.model = "claude-agent/claude-sonnet-4-5"
+
+    assert config.get_provider_name() == "claude_agent"
+
+
 def test_find_by_model_prefers_explicit_prefix_over_generic_codex_keyword():
     spec = find_by_model("github-copilot/gpt-5.3-codex")
 
@@ -128,3 +136,7 @@ def test_litellm_provider_canonicalizes_github_copilot_hyphen_prefix():
 def test_openai_codex_strip_prefix_supports_hyphen_and_underscore():
     assert _strip_model_prefix("openai-codex/gpt-5.1-codex") == "gpt-5.1-codex"
     assert _strip_model_prefix("openai_codex/gpt-5.1-codex") == "gpt-5.1-codex"
+
+
+def test_normalize_claude_agent_model_prefix():
+    assert _normalize_claude_agent_model("claude-agent/claude-sonnet-4-5") == "claude-sonnet-4-5"
