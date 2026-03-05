@@ -6,6 +6,8 @@ import pytest
 from typer.testing import CliRunner
 
 from nanobot.cli.commands import app
+from nanobot.cli.commands import _make_native_worker_provider
+from nanobot.cli.commands import _make_provider
 from nanobot.cli.commands import _normalize_claude_agent_model
 from nanobot.config.schema import Config
 from nanobot.providers.litellm_provider import LiteLLMProvider
@@ -140,3 +142,67 @@ def test_openai_codex_strip_prefix_supports_hyphen_and_underscore():
 
 def test_normalize_claude_agent_model_prefix():
     assert _normalize_claude_agent_model("claude-agent/claude-sonnet-4-5") == "claude-sonnet-4-5"
+
+
+def test_make_provider_claude_uses_claude_worker_config(monkeypatch, tmp_path):
+    captured = {}
+
+    class StubClaudeProvider:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(
+        "nanobot.providers.claude_agent_sdk_provider.ClaudeAgentSDKProvider",
+        StubClaudeProvider,
+    )
+
+    config = Config()
+    config.agents.defaults.workspace = str(tmp_path)
+    config.agents.defaults.model = "claude-agent/claude-sonnet-4-5"
+    config.agents.defaults.max_tool_iterations = 11
+    config.agents.claude_worker.model = "claude-opus-4-1"
+    config.agents.claude_worker.timeout_seconds = 321
+    config.agents.claude_worker.max_turns = 8
+    config.agents.claude_worker.max_internal_native_steps = 5
+    config.agents.claude_worker.permission_mode = "bypassPermissions"
+    config.agents.claude_worker.strict_auth = True
+    config.agents.claude_worker.diagnostic_logging = True
+
+    provider = _make_provider(config)
+
+    assert isinstance(provider, StubClaudeProvider)
+    assert captured["default_model"] == "claude-sonnet-4-5"
+    assert captured["timeout_seconds"] == 321
+    assert captured["max_turns"] == 8
+    assert captured["max_internal_native_steps"] == 5
+    assert captured["permission_mode"] == "bypassPermissions"
+    assert captured["strict_auth"] is True
+    assert captured["diagnostic_logging"] is True
+
+
+def test_make_native_worker_provider_for_claude_uses_claude_worker_model(monkeypatch, tmp_path):
+    captured = {}
+
+    class StubClaudeProvider:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(
+        "nanobot.providers.claude_agent_sdk_provider.ClaudeAgentSDKProvider",
+        StubClaudeProvider,
+    )
+
+    config = Config()
+    config.agents.defaults.workspace = str(tmp_path)
+    config.agents.defaults.model = "claude-agent/claude-sonnet-4-5"
+    config.agents.defaults.max_tool_iterations = 9
+    config.agents.claude_worker.model = "claude-opus-4-1"
+    config.agents.claude_worker.timeout_seconds = 456
+
+    provider = _make_native_worker_provider(config)
+
+    assert isinstance(provider, StubClaudeProvider)
+    assert captured["default_model"] == "claude-opus-4-1"
+    assert captured["timeout_seconds"] == 456
+    assert captured["max_turns"] == 9
+    assert captured["max_internal_native_steps"] == 9

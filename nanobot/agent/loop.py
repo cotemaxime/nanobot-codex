@@ -46,12 +46,18 @@ class AgentLoop:
     5. Sends responses back
     """
 
-    MODEL_CHOICES = [
+    CODEX_MODEL_CHOICES = [
         "openai-codex/gpt-5.1-codex",
         "openai-codex/gpt-5-codex",
         "openai-codex/gpt-5-codex-mini",
         "openai-codex/gpt-5.2",
     ]
+    CLAUDE_MODEL_CHOICES = [
+        "claude-agent/claude-sonnet-4-5",
+        "claude-agent/claude-opus-4-1",
+        "claude-agent/claude-haiku-4-5",
+    ]
+    MODEL_CHOICES = CODEX_MODEL_CHOICES
     REACTION_APPROVE = {"👍", "✅", "☑️", "👌"}
     REACTION_RETRY = {"🔁", "🔄", "⟳"}
     REACTION_REDO = {"♻️", "↩️", "↪️"}
@@ -188,7 +194,7 @@ class AgentLoop:
         self.tools = ToolRegistry()
         self._web_research_provider = (
             subagent_provider
-            if subagent_provider and subagent_provider.__class__.__name__ == "CodexSDKProvider"
+            if subagent_provider and subagent_provider.__class__.__name__ in _NATIVE_SDK_PROVIDER_CLASS_NAMES
             else None
         )
         self.subagents = SubagentManager(
@@ -291,9 +297,9 @@ class AgentLoop:
             restrict_to_workspace=self.restrict_to_workspace,
         ))
         
-        # Web tools: route `web_search` through Codex SDK worker when available.
+        # Web tools: route `web_search` through a native SDK worker when available.
         if self._web_research_provider is not None:
-            self.tools.register(CodexWebSearchTool(researcher=self._codex_web_search))
+            self.tools.register(CodexWebSearchTool(researcher=self._native_sdk_web_search))
         elif self._should_register_nanobot_web_tools():
             self.tools.register(WebSearchTool(api_key=self.brave_api_key))
         self.tools.register(WebFetchTool())
@@ -326,17 +332,17 @@ class AgentLoop:
         """Return whether nanobot web tools should be registered."""
         model_name = (self.model or "").strip().lower()
         provider_name = self.provider.__class__.__name__
-        if model_name.startswith("openai-codex/"):
+        if model_name.startswith("openai-codex/") or model_name.startswith("claude-agent/"):
             return False
         if provider_name in _NATIVE_SDK_PROVIDER_CLASS_NAMES:
             return False
         return True
 
-    async def _codex_web_search(self, query: str, count: int | None = None) -> str:
-        """Run web research through the Codex SDK worker provider."""
+    async def _native_sdk_web_search(self, query: str, count: int | None = None) -> str:
+        """Run web research through a native SDK worker provider."""
         provider = self._web_research_provider
         if provider is None:
-            return "Error: Codex web research worker is not configured"
+            return "Error: Native SDK web research worker is not configured"
 
         n = min(max(count or 5, 1), 10)
         prompt = (
@@ -363,8 +369,20 @@ class AgentLoop:
         )
 
         if response.finish_reason == "error":
-            return f"Error: {response.content or 'Codex web research failed'}"
+            return f"Error: {response.content or 'web research failed'}"
         return (response.content or "").strip() or "No results."
+
+    async def _codex_web_search(self, query: str, count: int | None = None) -> str:
+        """Backward-compatible alias for existing tool wiring/tests."""
+        return await self._native_sdk_web_search(query=query, count=count)
+
+    def _model_choices_for_session(self, current_model: str) -> list[str]:
+        """Resolve model options shown by `/model` based on active provider family."""
+        provider_name = self.provider.__class__.__name__
+        current = (current_model or "").strip().lower()
+        if current.startswith("claude-agent/") or provider_name == "ClaudeAgentSDKProvider":
+            return list(self.CLAUDE_MODEL_CHOICES)
+        return list(self.CODEX_MODEL_CHOICES)
 
     @classmethod
     def _looks_like_planner_refusal(cls, content: str | None) -> bool:
@@ -962,8 +980,8 @@ class AgentLoop:
                 "Send `list` to see available skills."
             )
         if cmd_base == "/model":
-            model_choices = list(self.MODEL_CHOICES)
             current_model = self._normalize_model_name(session.metadata.get("model_override") or self.model) or self.model
+            model_choices = self._model_choices_for_session(current_model)
             if current_model not in model_choices:
                 model_choices.insert(0, current_model)
             session.metadata["pending_action"] = "set_model"

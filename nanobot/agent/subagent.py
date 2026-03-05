@@ -18,7 +18,7 @@ from nanobot.agent.tools.filesystem import ReadFileTool, WriteFileTool, EditFile
 from nanobot.agent.tools.shell import ExecTool
 from nanobot.agent.tools.web import WebSearchTool, WebFetchTool
 
-_CODEX_PROVIDER_CLASS_NAMES = {"OpenAICodexProvider", "CodexSDKProvider"}
+_NATIVE_SDK_PROVIDER_CLASS_NAMES = {"OpenAICodexProvider", "CodexSDKProvider", "ClaudeAgentSDKProvider"}
 
 
 class SubagentManager:
@@ -419,9 +419,9 @@ When you have completed the task, provide a clear summary of your findings or ac
         """Return whether nanobot web tools should be registered."""
         model_name = (self.model or "").strip().lower()
         provider_name = self.provider.__class__.__name__
-        if model_name.startswith("openai-codex/"):
+        if model_name.startswith("openai-codex/") or model_name.startswith("claude-agent/"):
             return False
-        if provider_name in _CODEX_PROVIDER_CLASS_NAMES:
+        if provider_name in _NATIVE_SDK_PROVIDER_CLASS_NAMES:
             return False
         return True
 

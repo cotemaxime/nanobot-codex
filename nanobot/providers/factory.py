@@ -61,17 +61,31 @@ def create_provider(config):
             return OpenAICodexProvider(default_model=model)
 
     if provider_name == "claude_agent" or model.startswith("claude-agent/"):
-        worker_cfg = config.agents.codex_worker
-        claude_model = _normalize_claude_agent_model(model) or "claude-sonnet-4-5"
+        worker_cfg = config.agents.claude_worker
+        claude_model = (
+            _normalize_claude_agent_model(model)
+            or _normalize_claude_agent_model(worker_cfg.model)
+            or "claude-sonnet-4-5"
+        )
+        max_turns = (
+            int(worker_cfg.max_turns)
+            if worker_cfg.max_turns is not None
+            else max(4, config.agents.defaults.max_tool_iterations)
+        )
+        max_internal_native_steps = (
+            int(worker_cfg.max_internal_native_steps)
+            if worker_cfg.max_internal_native_steps is not None
+            else max(1, config.agents.defaults.max_tool_iterations)
+        )
         try:
             provider = ClaudeAgentSDKProvider(
                 default_model=claude_model,
                 workspace=str(config.workspace_path),
                 timeout_seconds=worker_cfg.timeout_seconds,
-                max_turns=max(4, config.agents.defaults.max_tool_iterations),
-                max_internal_native_steps=max(1, config.agents.defaults.max_tool_iterations),
-                permission_mode="acceptEdits",
-                strict_auth=False,
+                max_turns=max_turns,
+                max_internal_native_steps=max_internal_native_steps,
+                permission_mode=worker_cfg.permission_mode,
+                strict_auth=worker_cfg.strict_auth,
                 diagnostic_logging=worker_cfg.diagnostic_logging,
             )
             logger.info("Provider selected: claude-agent-sdk (model={})", claude_model)

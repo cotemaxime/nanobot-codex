@@ -346,17 +346,31 @@ def _make_provider(config: Config):
 
     # Claude Agent SDK (OAuth/session-style local auth)
     if provider_name == "claude_agent" or model.startswith("claude-agent/"):
-        worker_cfg = config.agents.codex_worker
-        claude_model = _normalize_claude_agent_model(model) or "claude-sonnet-4-5"
+        worker_cfg = config.agents.claude_worker
+        claude_model = (
+            _normalize_claude_agent_model(model)
+            or _normalize_claude_agent_model(worker_cfg.model)
+            or "claude-sonnet-4-5"
+        )
+        max_turns = (
+            int(worker_cfg.max_turns)
+            if worker_cfg.max_turns is not None
+            else max(4, config.agents.defaults.max_tool_iterations)
+        )
+        max_internal_native_steps = (
+            int(worker_cfg.max_internal_native_steps)
+            if worker_cfg.max_internal_native_steps is not None
+            else max(1, config.agents.defaults.max_tool_iterations)
+        )
         try:
             provider = ClaudeAgentSDKProvider(
                 default_model=claude_model,
                 workspace=str(config.workspace_path),
                 timeout_seconds=worker_cfg.timeout_seconds,
-                max_turns=max(4, config.agents.defaults.max_tool_iterations),
-                max_internal_native_steps=max(1, config.agents.defaults.max_tool_iterations),
-                permission_mode="acceptEdits",
-                strict_auth=False,
+                max_turns=max_turns,
+                max_internal_native_steps=max_internal_native_steps,
+                permission_mode=worker_cfg.permission_mode,
+                strict_auth=worker_cfg.strict_auth,
                 diagnostic_logging=worker_cfg.diagnostic_logging,
             )
             logger.info("Provider selected: claude-agent-sdk (model={})", claude_model)
@@ -473,32 +487,67 @@ def _build_context_limits(config: Config) -> tuple[float, int, dict[str, int]]:
     return threshold, main_limit, limits
 
 
-def _make_codex_worker_provider(config: Config):
-    """Create optional Codex SDK worker provider for delegated tasks."""
+def _make_native_worker_provider(config: Config):
+    """Create optional native SDK worker provider for delegated tasks."""
     from loguru import logger
+    from nanobot.providers.claude_agent_sdk_provider import ClaudeAgentSDKProvider
     from nanobot.providers.codex_sdk_provider import CodexSDKProvider
 
     model = (config.agents.defaults.model or "").strip().lower()
-    if not model.startswith("openai-codex/"):
-        return None
 
-    worker_cfg = config.agents.codex_worker
-    worker_model = _normalize_sdk_model_name(worker_cfg.model) or "gpt-5.3-codex"
-    try:
-        return CodexSDKProvider(
-            default_model=worker_model,
-            workspace=str(config.workspace_path),
-            timeout_seconds=worker_cfg.timeout_seconds,
-            sandbox_mode=worker_cfg.sandbox_mode,
-            approval_policy=worker_cfg.approval_policy,
-            network_access_enabled=worker_cfg.network_access_enabled,
-            web_search_enabled=worker_cfg.web_search_enabled,
-            stream_reader_limit_bytes=worker_cfg.stream_reader_limit_bytes,
-            diagnostic_logging=worker_cfg.diagnostic_logging,
+    if model.startswith("openai-codex/"):
+        worker_cfg = config.agents.codex_worker
+        worker_model = _normalize_sdk_model_name(worker_cfg.model) or "gpt-5.3-codex"
+        try:
+            return CodexSDKProvider(
+                default_model=worker_model,
+                workspace=str(config.workspace_path),
+                timeout_seconds=worker_cfg.timeout_seconds,
+                sandbox_mode=worker_cfg.sandbox_mode,
+                approval_policy=worker_cfg.approval_policy,
+                network_access_enabled=worker_cfg.network_access_enabled,
+                web_search_enabled=worker_cfg.web_search_enabled,
+                stream_reader_limit_bytes=worker_cfg.stream_reader_limit_bytes,
+                diagnostic_logging=worker_cfg.diagnostic_logging,
+            )
+        except Exception as e:
+            logger.warning(f"Codex worker bridge unavailable, continuing without bridge: {e}")
+            return None
+
+    if model.startswith("claude-agent/"):
+        worker_cfg = config.agents.claude_worker
+        worker_model = _normalize_claude_agent_model(worker_cfg.model) or "claude-sonnet-4-5"
+        max_turns = (
+            int(worker_cfg.max_turns)
+            if worker_cfg.max_turns is not None
+            else max(4, config.agents.defaults.max_tool_iterations)
         )
-    except Exception as e:
-        logger.warning(f"Codex worker bridge unavailable, continuing without bridge: {e}")
-        return None
+        max_internal_native_steps = (
+            int(worker_cfg.max_internal_native_steps)
+            if worker_cfg.max_internal_native_steps is not None
+            else max(1, config.agents.defaults.max_tool_iterations)
+        )
+        try:
+            return ClaudeAgentSDKProvider(
+                default_model=worker_model,
+                workspace=str(config.workspace_path),
+                timeout_seconds=worker_cfg.timeout_seconds,
+                max_turns=max_turns,
+                max_internal_native_steps=max_internal_native_steps,
+                permission_mode=worker_cfg.permission_mode,
+                strict_auth=worker_cfg.strict_auth,
+                diagnostic_logging=worker_cfg.diagnostic_logging,
+            )
+        except Exception as e:
+            logger.warning(f"Claude worker bridge unavailable, continuing without bridge: {e}")
+            return None
+
+    return None
+
+
+def _make_codex_worker_provider(config: Config):
+    """Backward-compatible alias for native SDK worker provider."""
+    return _make_native_worker_provider(config)
 
 
 # ============================================================================
@@ -531,14 +580,17 @@ def gateway(
     _setup_runtime_file_logging(config)
     bus = MessageBus()
     provider = _make_provider(config)
-    worker_provider = _make_codex_worker_provider(config)
+    worker_provider = _make_native_worker_provider(config)
     spawn_bridge_mode = False
-    worker_fallback_models = (
-        config.agents.codex_worker.fallback_models if worker_provider is not None else None
-    )
-    worker_heartbeat_interval = (
-        config.agents.codex_worker.heartbeat_interval_seconds if worker_provider is not None else 30
-    )
+    worker_fallback_models = None
+    worker_heartbeat_interval = 30
+    model = (config.agents.defaults.model or "").strip().lower()
+    if worker_provider is not None and model.startswith("openai-codex/"):
+        worker_fallback_models = config.agents.codex_worker.fallback_models
+        worker_heartbeat_interval = config.agents.codex_worker.heartbeat_interval_seconds
+    if worker_provider is not None and model.startswith("claude-agent/"):
+        worker_fallback_models = config.agents.claude_worker.fallback_models
+        worker_heartbeat_interval = config.agents.claude_worker.heartbeat_interval_seconds
     session_manager = SessionManager(config.workspace_path)
     
     # Create cron service first (callback set after agent creation)
@@ -669,14 +721,17 @@ def agent(
     
     bus = MessageBus()
     provider = _make_provider(config)
-    worker_provider = _make_codex_worker_provider(config)
+    worker_provider = _make_native_worker_provider(config)
     spawn_bridge_mode = False
-    worker_fallback_models = (
-        config.agents.codex_worker.fallback_models if worker_provider is not None else None
-    )
-    worker_heartbeat_interval = (
-        config.agents.codex_worker.heartbeat_interval_seconds if worker_provider is not None else 30
-    )
+    worker_fallback_models = None
+    worker_heartbeat_interval = 30
+    model = (config.agents.defaults.model or "").strip().lower()
+    if worker_provider is not None and model.startswith("openai-codex/"):
+        worker_fallback_models = config.agents.codex_worker.fallback_models
+        worker_heartbeat_interval = config.agents.codex_worker.heartbeat_interval_seconds
+    if worker_provider is not None and model.startswith("claude-agent/"):
+        worker_fallback_models = config.agents.claude_worker.fallback_models
+        worker_heartbeat_interval = config.agents.claude_worker.heartbeat_interval_seconds
 
     # Create cron service for tool usage (no callback needed for CLI unless running)
     cron_store_path = get_data_dir() / "cron" / "jobs.json"

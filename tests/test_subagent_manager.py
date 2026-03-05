@@ -23,6 +23,10 @@ class GenericProvider:
         return LLMResponse(content="done")
 
 
+class ClaudeAgentSDKProvider(GenericProvider):
+    pass
+
+
 class SlowProvider:
     def get_default_model(self) -> str:
         return "anthropic/claude-3-5-haiku"
@@ -66,6 +70,15 @@ def test_subagent_non_codex_model_registers_nanobot_web_tools(tmp_path):
         bus=MessageBus(),
     )
     assert manager._should_register_nanobot_web_tools() is True
+
+
+def test_subagent_claude_sdk_provider_does_not_register_nanobot_web_tools(tmp_path):
+    manager = SubagentManager(
+        provider=ClaudeAgentSDKProvider(),
+        workspace=tmp_path,
+        bus=MessageBus(),
+    )
+    assert manager._should_register_nanobot_web_tools() is False
 
 
 @pytest.mark.asyncio

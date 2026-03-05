@@ -104,6 +104,25 @@ def test_codex_model_with_worker_registers_codex_web_search_tool(tmp_path):
     assert loop.tools.has("web_fetch")
 
 
+def test_claude_model_with_worker_registers_codex_web_search_tool(tmp_path):
+    class ClaudeAgentSDKProvider(ScriptedProvider):
+        pass
+
+    provider = ScriptedProvider(default_model="claude-agent/claude-sonnet-4-5")
+    worker = ClaudeAgentSDKProvider(default_model="claude-sonnet-4-5")
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=provider,
+        workspace=tmp_path,
+        session_manager=InMemorySessionManager(),
+        model="claude-agent/claude-sonnet-4-5",
+        subagent_provider=worker,
+    )
+
+    assert loop.tools.has("web_search")
+    assert loop.tools.has("web_fetch")
+
+
 def test_non_codex_model_registers_nanobot_web_tools(tmp_path):
     provider = ScriptedProvider(default_model="anthropic/claude-3-5-haiku")
     loop = AgentLoop(
@@ -662,6 +681,30 @@ async def test_model_selection_rejects_non_numeric_input(tmp_path):
     session = manager.get_or_create("telegram:chat")
     assert session.metadata.get("model_override") is None
     assert session.metadata.get("pending_action") == "set_model"
+
+
+@pytest.mark.asyncio
+async def test_model_command_offers_claude_family_choices(tmp_path):
+    manager = InMemorySessionManager()
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=ScriptedProvider(default_model="claude-agent/claude-sonnet-4-5"),
+        workspace=tmp_path,
+        session_manager=manager,
+        model="claude-agent/claude-sonnet-4-5",
+    )
+
+    response = await loop.process_direct(
+        "/model",
+        session_key="telegram:chat",
+        channel="telegram",
+        chat_id="chat",
+    )
+
+    assert "claude-agent/claude-sonnet-4-5" in response
+    assert "claude-agent/claude-opus-4-1" in response
+    assert "claude-agent/claude-haiku-4-5" in response
+    assert "openai-codex/gpt-5.1-codex" not in response
 
 
 @pytest.mark.asyncio

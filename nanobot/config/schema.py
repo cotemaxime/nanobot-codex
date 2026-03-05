@@ -210,12 +210,27 @@ class CodexWorkerConfig(Base):
     web_search_enabled: bool = True
 
 
+class ClaudeWorkerConfig(Base):
+    """Claude Agent SDK worker settings for delegated task execution."""
+
+    model: str = "claude-sonnet-4-5"
+    fallback_models: list[str] = Field(default_factory=list)
+    timeout_seconds: int = 600
+    heartbeat_interval_seconds: int = 30
+    diagnostic_logging: bool = False
+    permission_mode: str = "acceptEdits"
+    max_turns: int | None = None
+    max_internal_native_steps: int | None = None
+    strict_auth: bool = False
+
+
 class AgentsConfig(Base):
     """Agent configuration."""
 
     defaults: AgentDefaults = Field(default_factory=AgentDefaults)
     disabled_skills: list[str] = Field(default_factory=list)
     codex_worker: CodexWorkerConfig = Field(default_factory=CodexWorkerConfig)
+    claude_worker: ClaudeWorkerConfig = Field(default_factory=ClaudeWorkerConfig)
 
 
 class ProviderConfig(Base):
