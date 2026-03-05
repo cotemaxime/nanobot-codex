@@ -206,3 +206,44 @@ def test_make_native_worker_provider_for_claude_uses_claude_worker_model(monkeyp
     assert captured["timeout_seconds"] == 456
     assert captured["max_turns"] == 9
     assert captured["max_internal_native_steps"] == 9
+
+
+def test_agent_cli_uses_claude_worker_runtime_settings(monkeypatch, tmp_path):
+    captured = {}
+
+    class FakeLoop:
+        def __init__(self, *args, **kwargs):
+            captured.update(kwargs)
+
+        async def process_direct(self, *_args, **_kwargs):
+            return "ok"
+
+        async def close_mcp(self):
+            return None
+
+    class FakeCronService:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+    class FakeProvider:
+        pass
+
+    config = Config()
+    config.agents.defaults.workspace = str(tmp_path)
+    config.agents.defaults.model = "claude-agent/claude-sonnet-4-5"
+    config.agents.claude_worker.fallback_models = ["claude-opus-4-1"]
+    config.agents.claude_worker.heartbeat_interval_seconds = 77
+
+    monkeypatch.setattr("nanobot.config.loader.load_config", lambda: config)
+    monkeypatch.setattr("nanobot.config.loader.get_data_dir", lambda: tmp_path)
+    monkeypatch.setattr("nanobot.cli.commands._setup_runtime_file_logging", lambda _cfg: None)
+    monkeypatch.setattr("nanobot.cli.commands._make_provider", lambda _cfg: FakeProvider())
+    monkeypatch.setattr("nanobot.cli.commands._make_native_worker_provider", lambda _cfg: FakeProvider())
+    monkeypatch.setattr("nanobot.agent.loop.AgentLoop", FakeLoop)
+    monkeypatch.setattr("nanobot.cron.service.CronService", FakeCronService)
+
+    result = runner.invoke(app, ["agent", "-m", "hello"])
+
+    assert result.exit_code == 0
+    assert captured["subagent_fallback_models"] == ["claude-opus-4-1"]
+    assert captured["subagent_heartbeat_interval_seconds"] == 77

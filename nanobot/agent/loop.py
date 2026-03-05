@@ -22,7 +22,7 @@ from nanobot.agent.slash_commands import SlashCommandsLoader
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.filesystem import ReadFileTool, WriteFileTool, EditFileTool, ListDirTool
 from nanobot.agent.tools.shell import ExecTool
-from nanobot.agent.tools.web import CodexWebSearchTool, WebFetchTool, WebSearchTool
+from nanobot.agent.tools.web import NativeSDKWebSearchTool, WebFetchTool, WebSearchTool
 from nanobot.agent.tools.message import MessageTool
 from nanobot.agent.tools.spawn import SpawnTool
 from nanobot.agent.tools.cron import CronTool
@@ -211,6 +211,17 @@ class AgentLoop:
             fallback_models=subagent_fallback_models,
             heartbeat_interval_seconds=subagent_heartbeat_interval_seconds,
         )
+        planner_provider_name = self.provider.__class__.__name__
+        worker_provider_name = (subagent_provider or self.provider).__class__.__name__
+        logger.info(
+            "Agent runtime providers: planner={} model={} worker={} worker_model={} fallback_models={} heartbeat={}s",
+            planner_provider_name,
+            self.model,
+            worker_provider_name,
+            (subagent_provider.get_default_model() if subagent_provider else self.model),
+            subagent_fallback_models or [],
+            subagent_heartbeat_interval_seconds,
+        )
         
         self._running = False
         self._mcp_servers = mcp_servers or {}
@@ -299,7 +310,7 @@ class AgentLoop:
         
         # Web tools: route `web_search` through a native SDK worker when available.
         if self._web_research_provider is not None:
-            self.tools.register(CodexWebSearchTool(researcher=self._native_sdk_web_search))
+            self.tools.register(NativeSDKWebSearchTool(researcher=self._native_sdk_web_search))
         elif self._should_register_nanobot_web_tools():
             self.tools.register(WebSearchTool(api_key=self.brave_api_key))
         self.tools.register(WebFetchTool())

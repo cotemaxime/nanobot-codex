@@ -678,6 +678,7 @@ Config file: `~/.nanobot/config.json`
 | `vllm` | LLM (local, any OpenAI-compatible server) | — |
 | `openai_codex` | LLM (Codex, OAuth) | `nanobot provider login openai-codex` |
 | `github_copilot` | LLM (GitHub Copilot, OAuth) | `nanobot provider login github-copilot` |
+| `claude_agent` | LLM (Claude Agent SDK, local auth) | `nanobot provider login claude-agent` |
 
 <details>
 <summary><b>OpenAI Codex (OAuth)</b></summary>
@@ -706,6 +707,39 @@ nanobot agent -m "Hello!"
 ```
 
 > Docker users: use `docker run -it` for interactive OAuth login.
+
+</details>
+
+<details>
+<summary><b>Claude Agent SDK (local auth)</b></summary>
+
+Claude agent mode uses your local Claude auth session (no API key in config).
+
+**1. Login:**
+```bash
+nanobot provider login claude-agent
+```
+
+**2. Set model and worker settings** (merge into `~/.nanobot/config.json`):
+```json
+{
+  "agents": {
+    "defaults": {
+      "model": "claude-agent/claude-sonnet-4-5"
+    },
+    "claudeWorker": {
+      "model": "claude-sonnet-4-5",
+      "fallbackModels": ["claude-opus-4-1"],
+      "heartbeatIntervalSeconds": 30
+    }
+  }
+}
+```
+
+**3. Chat:**
+```bash
+nanobot agent -m "Hello!"
+```
 
 </details>
 
@@ -896,6 +930,7 @@ MCP tools are automatically discovered and registered on startup. The LLM can us
 | `nanobot gateway` | Start the gateway |
 | `nanobot status` | Show status |
 | `nanobot provider login openai-codex` | OAuth login for providers |
+| `nanobot provider login claude-agent` | Local Claude auth check |
 | `nanobot channels login` | Link WhatsApp (scan QR) |
 | `nanobot channels status` | Show channel status |
 

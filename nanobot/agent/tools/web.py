@@ -90,11 +90,11 @@ class WebSearchTool(Tool):
             return f"Error: {e}"
 
 
-class CodexWebSearchTool(Tool):
-    """Search the web via a Codex SDK worker using native research capabilities."""
+class NativeSDKWebSearchTool(Tool):
+    """Search the web via a native SDK worker using research capabilities."""
 
     name = "web_search"
-    description = "Search the web using Codex native web research."
+    description = "Search the web using native SDK web research."
     parameters = {
         "type": "object",
         "properties": {
@@ -122,6 +122,10 @@ class CodexWebSearchTool(Tool):
             return await self._researcher(q, n)
         except Exception as e:
             return f"Error: {e}"
+
+
+# Backward compatibility: existing imports still work.
+CodexWebSearchTool = NativeSDKWebSearchTool
 
 
 class WebFetchTool(Tool):
