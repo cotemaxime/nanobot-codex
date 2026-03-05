@@ -311,6 +311,42 @@ async def test_codex_sdk_progress_callback_emits_thinking_status(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_claude_sdk_progress_callback_emits_thinking_status(tmp_path):
+    class ClaudeAgentSDKProvider(ScriptedProvider):
+        pass
+
+    provider = ClaudeAgentSDKProvider(
+        default_model="claude-agent/claude-sonnet-4-5",
+        responses=[LLMResponse(content="done")],
+    )
+
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=provider,
+        workspace=tmp_path,
+        session_manager=InMemorySessionManager(),
+        model="claude-agent/claude-sonnet-4-5",
+    )
+
+    progress_updates: list[str] = []
+
+    async def _progress(text: str) -> None:
+        progress_updates.append(text)
+
+    response = await loop.process_direct(
+        "status check",
+        session_key="cli:test-claude-progress",
+        channel="cli",
+        chat_id="test-claude-progress",
+        on_progress=_progress,
+    )
+
+    assert response == "done"
+    assert progress_updates
+    assert progress_updates[0].startswith("Thinking with Claude Agent SDK")
+
+
+@pytest.mark.asyncio
 async def test_default_bus_progress_streams_with_explicit_prefix(tmp_path):
     f = tmp_path / "note.txt"
     f.write_text("tool output", encoding="utf-8")

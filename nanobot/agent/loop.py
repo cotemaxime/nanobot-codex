@@ -31,7 +31,7 @@ from nanobot.agent.memory import MemoryStore
 from nanobot.agent.subagent import SubagentManager
 from nanobot.session.manager import Session, SessionManager
 
-_CODEX_PROVIDER_CLASS_NAMES = {"OpenAICodexProvider", "CodexSDKProvider"}
+_NATIVE_SDK_PROVIDER_CLASS_NAMES = {"OpenAICodexProvider", "CodexSDKProvider", "ClaudeAgentSDKProvider"}
 
 
 class AgentLoop:
@@ -328,7 +328,7 @@ class AgentLoop:
         provider_name = self.provider.__class__.__name__
         if model_name.startswith("openai-codex/"):
             return False
-        if provider_name in _CODEX_PROVIDER_CLASS_NAMES:
+        if provider_name in _NATIVE_SDK_PROVIDER_CLASS_NAMES:
             return False
         return True
 
@@ -578,11 +578,13 @@ class AgentLoop:
             current_model = self._active_model_ctx.get() or model or self.model
             progress_stop: asyncio.Event | None = None
             progress_task: asyncio.Task | None = None
-            if on_progress and self.provider.__class__.__name__ == "CodexSDKProvider":
+            progress_label = self._provider_progress_label()
+            if on_progress and progress_label:
                 progress_stop = asyncio.Event()
                 progress_task = asyncio.create_task(
                     self._run_codex_progress_heartbeat(
                         on_progress=on_progress,
+                        provider_label=progress_label,
                         step=iteration,
                         max_steps=self.max_iterations,
                         stop_event=progress_stop,
@@ -651,6 +653,7 @@ class AgentLoop:
     async def _run_codex_progress_heartbeat(
         self,
         on_progress: Callable[[str], Awaitable[None]],
+        provider_label: str,
         step: int,
         max_steps: int,
         stop_event: asyncio.Event,
@@ -658,7 +661,7 @@ class AgentLoop:
         """Emit paced progress updates while an SDK call is running."""
         elapsed_seconds = 0
         try:
-            await on_progress(f"Thinking with Codex SDK (step {step}/{max_steps})...")
+            await on_progress(f"Thinking with {provider_label} (step {step}/{max_steps})...")
         except Exception:
             return
 
@@ -671,10 +674,19 @@ class AgentLoop:
                 minutes = elapsed_seconds // 60
                 try:
                     await on_progress(
-                        f"Still working with Codex SDK ({minutes}m elapsed, step {step}/{max_steps})..."
+                        f"Still working with {provider_label} ({minutes}m elapsed, step {step}/{max_steps})..."
                     )
                 except Exception:
                     return
+
+    def _provider_progress_label(self) -> str | None:
+        """Return progress label for providers that run long SDK turns."""
+        name = self.provider.__class__.__name__
+        if name == "CodexSDKProvider":
+            return "Codex SDK"
+        if name == "ClaudeAgentSDKProvider":
+            return "Claude Agent SDK"
+        return None
 
     def _set_model_from_tool(self, action: str, model: str | None, persist: bool) -> str:
         """Apply model switch requested via set_model tool."""

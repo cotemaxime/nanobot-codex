@@ -69,8 +69,10 @@ def create_provider(config):
                 workspace=str(config.workspace_path),
                 timeout_seconds=worker_cfg.timeout_seconds,
                 max_turns=max(4, config.agents.defaults.max_tool_iterations),
+                max_internal_native_steps=max(1, config.agents.defaults.max_tool_iterations),
                 permission_mode="acceptEdits",
                 strict_auth=False,
+                diagnostic_logging=worker_cfg.diagnostic_logging,
             )
             logger.info("Provider selected: claude-agent-sdk (model={})", claude_model)
             return provider
