@@ -74,6 +74,8 @@ class CronService:
         self._last_mtime: float = 0.0
         self._timer_task: asyncio.Task | None = None
         self._running = False
+        self._executing = False  # Guard against re-entrant _on_timer calls
+        self._executing_job_ids: set[str] = set()  # Track jobs currently running
 
     def _load_store(self) -> CronStore:
         """Load jobs from disk. Reloads automatically if file was modified externally."""
@@ -226,24 +228,45 @@ class CronService:
 
     async def _on_timer(self) -> None:
         """Handle timer tick - run due jobs."""
-        self._load_store()
-        if not self._store:
+        if self._executing:
+            logger.debug("Cron: skipping timer tick, already executing")
             return
 
-        now = _now_ms()
-        due_jobs = [
-            j for j in self._store.jobs
-            if j.enabled and j.state.next_run_at_ms and now >= j.state.next_run_at_ms
-        ]
+        self._executing = True
+        try:
+            self._load_store()
+            if not self._store:
+                return
 
-        for job in due_jobs:
-            await self._execute_job(job)
+            now = _now_ms()
+            due_jobs = [
+                j for j in self._store.jobs
+                if j.enabled
+                and j.state.next_run_at_ms
+                and now >= j.state.next_run_at_ms
+                and j.id not in self._executing_job_ids
+            ]
 
-        self._save_store()
-        self._arm_timer()
+            for job in due_jobs:
+                # Advance next_run_at_ms BEFORE execution so reloads/re-entries
+                # won't pick up the same job as "due" again.
+                self._executing_job_ids.add(job.id)
+                if job.schedule.kind != "at":
+                    job.state.next_run_at_ms = _compute_next_run(job.schedule, _now_ms())
+                else:
+                    job.state.next_run_at_ms = None
+                self._save_store()
+
+                await self._execute_job(job)
+                self._executing_job_ids.discard(job.id)
+
+            self._save_store()
+        finally:
+            self._executing = False
+            self._arm_timer()
 
     async def _execute_job(self, job: CronJob) -> None:
-        """Execute a single job."""
+        """Execute a single job. next_run_at_ms is already advanced by _on_timer."""
         start_ms = _now_ms()
         logger.info("Cron: executing job '{}' ({})", job.name, job.id)
 
@@ -271,9 +294,6 @@ class CronService:
             else:
                 job.enabled = False
                 job.state.next_run_at_ms = None
-        else:
-            # Compute next run
-            job.state.next_run_at_ms = _compute_next_run(job.schedule, _now_ms())
 
     # ========== Public API ==========
 
@@ -360,7 +380,14 @@ class CronService:
             if job.id == job_id:
                 if not force and not job.enabled:
                     return False
-                await self._execute_job(job)
+                if job.id in self._executing_job_ids:
+                    logger.warning("Cron: job '{}' is already executing, skipping", job.name)
+                    return False
+                self._executing_job_ids.add(job.id)
+                try:
+                    await self._execute_job(job)
+                finally:
+                    self._executing_job_ids.discard(job.id)
                 self._save_store()
                 self._arm_timer()
                 return True

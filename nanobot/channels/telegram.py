@@ -185,6 +185,8 @@ class TelegramChannel(BaseChannel):
         self._sender_topic_threads: dict[tuple[str, str], int] = {}  # (sender_id, chat_id) -> last thread_id
         self._chat_topic_threads: dict[str, int] = {}  # chat_id -> last observed thread_id
         self._reaction_handler_mode: str = "none"  # none | filters | fallback
+        # Editable progress status bubble: (chat_id, thread_id) -> message_id
+        self._progress_message_ids: dict[tuple[int, int | None], int] = {}
 
     def is_allowed(self, sender_id: str) -> bool:
         """Preserve Telegram's legacy id|username allowlist matching."""
@@ -369,15 +371,20 @@ class TelegramChannel(BaseChannel):
                 )
 
         # Send text content
-        if msg.content and msg.content != "[empty message]":
-            is_progress = msg.metadata.get("_progress", False)
+        is_progress = msg.metadata.get("_progress", False)
+        progress_key = (chat_id, thread_kwargs.get("message_thread_id"))
 
-            for chunk in split_message(msg.content, TELEGRAM_MAX_MESSAGE_LEN):
-                # Final response: simulate streaming via draft, then persist
-                if not is_progress:
+        if is_progress and msg.content:
+            # Editable status bubble: edit existing or send a new silent one
+            await self._update_progress_bubble(
+                chat_id, progress_key, msg.content, thread_kwargs,
+            )
+        else:
+            # Non-progress (final response or cleanup): delete status bubble
+            await self._delete_progress_bubble(chat_id, progress_key)
+            if msg.content and msg.content != "[empty message]":
+                for chunk in split_message(msg.content, TELEGRAM_MAX_MESSAGE_LEN):
                     await self._send_with_streaming(chat_id, chunk, reply_params, thread_kwargs)
-                else:
-                    await self._send_text(chat_id, chunk, reply_params, thread_kwargs)
 
     async def _send_text(
         self,
@@ -429,6 +436,54 @@ class TelegramChannel(BaseChannel):
         except Exception:
             pass
         await self._send_text(chat_id, text, reply_params, thread_kwargs)
+
+    async def _update_progress_bubble(
+        self,
+        chat_id: int,
+        progress_key: tuple[int, int | None],
+        text: str,
+        thread_kwargs: dict | None = None,
+    ) -> None:
+        """Edit the existing progress bubble or send a new silent one."""
+        display_text = f"\u23f3 {text}"
+        existing_id = self._progress_message_ids.get(progress_key)
+        if existing_id is not None:
+            try:
+                await self._app.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=existing_id,
+                    text=display_text,
+                )
+                return
+            except Exception:
+                # Message may have been deleted or is too old; send a new one
+                self._progress_message_ids.pop(progress_key, None)
+        try:
+            sent = await self._app.bot.send_message(
+                chat_id=chat_id,
+                text=display_text,
+                disable_notification=True,
+                **(thread_kwargs or {}),
+            )
+            self._progress_message_ids[progress_key] = sent.message_id
+        except Exception as e:
+            logger.debug("Failed to send progress bubble: {}", e)
+
+    async def _delete_progress_bubble(
+        self,
+        chat_id: int,
+        progress_key: tuple[int, int | None],
+    ) -> None:
+        """Delete the progress status bubble if one exists."""
+        msg_id = self._progress_message_ids.pop(progress_key, None)
+        if msg_id is not None:
+            try:
+                await self._app.bot.delete_message(
+                    chat_id=chat_id,
+                    message_id=msg_id,
+                )
+            except Exception:
+                pass  # Already deleted or too old
 
     async def _on_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle /start command."""

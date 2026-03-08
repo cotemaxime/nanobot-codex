@@ -222,22 +222,43 @@ class ClaudeAgentSDKProvider(LLMProvider):
                     chunks.append(text)
             if not chunks:
                 return ""
-            # If the last chunk is valid JSON on its own, prefer it (complete response).
-            # Otherwise concatenate all chunks (streamed fragments).
-            last = chunks[-1].strip()
-            if last.startswith("{") and last.endswith("}"):
+
+            # Strategy: find the best valid JSON object among chunks.
+            # 1. Check each chunk individually (last-to-first) for a complete JSON response.
+            for chunk in reversed(chunks):
+                candidate = chunk.strip()
+                if candidate.startswith("{") and candidate.endswith("}"):
+                    try:
+                        parsed = json.loads(candidate)
+                        if isinstance(parsed, dict) and ("content" in parsed or "tool_calls" in parsed):
+                            return candidate
+                    except Exception:
+                        pass
+
+            # 2. Concatenate and try to extract JSON from the combined text.
+            combined = "".join(chunks)
+            extracted = ClaudeAgentSDKProvider._extract_json_from_text(combined)
+            if extracted:
                 try:
-                    json.loads(last)
-                    return last
+                    parsed = json.loads(extracted)
+                    if isinstance(parsed, dict) and ("content" in parsed or "tool_calls" in parsed):
+                        return extracted
                 except Exception:
                     pass
-            return "".join(chunks)
+
+            return combined
 
         raw = await asyncio.wait_for(_run_query(), timeout=self.timeout_seconds)
         return self._parse_response_payload(raw)
 
     @staticmethod
     def _extract_stream_text(item: Any) -> str:
+        # Class names that indicate thinking/signature blocks — never stringify these.
+        _THINKING_TYPES = {"ThinkingBlock", "SignatureBlock", "Thinking", "ServerToolUse"}
+
+        def _is_thinking(obj: Any) -> bool:
+            return type(obj).__name__ in _THINKING_TYPES
+
         for attr in ("result", "content", "text", "message"):
             val = getattr(item, attr, None)
             if isinstance(val, str) and val.strip():
@@ -245,12 +266,13 @@ class ClaudeAgentSDKProvider(LLMProvider):
             if isinstance(val, list):
                 parts = []
                 for x in val:
+                    if _is_thinking(x):
+                        continue  # skip thinking/signature blocks
                     if isinstance(x, str):
                         parts.append(x)
                     elif hasattr(x, "text") and isinstance(x.text, str):
                         parts.append(x.text)
-                    elif x:
-                        parts.append(str(x))
+                    # Drop non-text blocks silently instead of str()-ifying them
                 joined = " ".join(parts)
                 if joined.strip():
                     return joined
@@ -262,13 +284,14 @@ class ClaudeAgentSDKProvider(LLMProvider):
     def _build_prompt(cls, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> str:
         schema = cls._output_contract_schema()
         lines = [
-            "You are executing one assistant turn for an external orchestrator.",
+            "You are producing the NEXT assistant turn for an external orchestrator.",
             "Return only valid JSON matching this schema:",
             json.dumps(schema, ensure_ascii=False),
             "",
             "Conversation (latest last):",
         ]
 
+        has_completed_tool_calls = False
         for m in messages:
             role = str(m.get("role", "unknown"))
             content = m.get("content")
@@ -277,13 +300,17 @@ class ClaudeAgentSDKProvider(LLMProvider):
             else:
                 content_txt = str(content or "")
             if role == "tool":
+                has_completed_tool_calls = True
                 lines.append(
-                    f"[{role}] name={m.get('name')} id={m.get('tool_call_id')}: {content_txt}"
+                    f"[tool_result] name={m.get('name')} id={m.get('tool_call_id')}: {content_txt}"
                 )
+            elif role == "assistant" and "tool_calls" in m:
+                tc_json = json.dumps(m["tool_calls"], ensure_ascii=False)
+                if content_txt and content_txt != "None":
+                    lines.append(f"[assistant] {content_txt}")
+                lines.append(f"[assistant_tool_calls] {tc_json}")
             else:
                 lines.append(f"[{role}] {content_txt}")
-            if "tool_calls" in m:
-                lines.append(f"[assistant_tool_calls] {json.dumps(m['tool_calls'], ensure_ascii=False)}")
 
         if tools:
             lines.append("")
@@ -295,6 +322,12 @@ class ClaudeAgentSDKProvider(LLMProvider):
         lines.append('- Put direct answer text in "content" when no tool call is needed.')
         lines.append('- For tool calls, set arguments as a JSON string object.')
         lines.append('- Never output markdown fences or prose outside the JSON object.')
+        if has_completed_tool_calls:
+            lines.append(
+                "- Tool calls shown above with [tool_result] have ALREADY been executed. "
+                "Do NOT repeat them. Either call a DIFFERENT tool, or if the task is complete, "
+                'return {"content": null, "tool_calls": [], "finish_reason": "stop", "reasoning_content": null}.'
+            )
         return "\n".join(lines)
 
     def _split_tool_definitions(
@@ -362,15 +395,31 @@ class ClaudeAgentSDKProvider(LLMProvider):
             except Exception:
                 pass
 
-        # Find the outermost { ... } block (greedy)
-        brace = re.search(r"\{.*\}", text, re.DOTALL)
-        if brace:
-            candidate = brace.group(0).strip()
-            try:
-                json.loads(candidate)
+        # Find all top-level JSON objects by scanning for '{' and trying
+        # progressively shorter substrings ending at each '}' from the right.
+        candidates: list[tuple[str, dict]] = []  # (raw_text, parsed_dict)
+        brace_starts = [i for i, c in enumerate(text) if c == "{"]
+        for start in brace_starts:
+            # Find all '}' positions after this start, try from rightmost first
+            end_positions = [j for j in range(len(text) - 1, start, -1) if text[j] == "}"]
+            for end in end_positions:
+                candidate = text[start : end + 1]
+                try:
+                    parsed = json.loads(candidate)
+                    if isinstance(parsed, dict):
+                        candidates.append((candidate, parsed))
+                        break  # found valid JSON from this start, move on
+                except Exception:
+                    continue
+
+        # Return the last candidate that looks like our response schema.
+        for candidate, parsed in reversed(candidates):
+            if "content" in parsed or "tool_calls" in parsed:
                 return candidate
-            except Exception:
-                pass
+
+        # Fall back to any valid JSON dict.
+        if candidates:
+            return candidates[-1][0]
 
         return None
 

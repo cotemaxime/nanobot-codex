@@ -324,7 +324,22 @@ class LiteLLMProvider(LLMProvider):
             }
 
         reasoning_content = getattr(message, "reasoning_content", None) or None
-        thinking_blocks = getattr(message, "thinking_blocks", None) or None
+        if not isinstance(reasoning_content, str):
+            reasoning_content = None
+        raw_thinking = getattr(message, "thinking_blocks", None) or None
+        # Ensure thinking_blocks are plain dicts, not SDK objects that would
+        # stringify as repr (e.g. ThinkingBlock(thinking='...', signature='...')).
+        thinking_blocks = None
+        if isinstance(raw_thinking, list):
+            sanitised = []
+            for tb in raw_thinking:
+                if isinstance(tb, dict):
+                    sanitised.append(tb)
+                elif hasattr(tb, "__dict__"):
+                    sanitised.append(dict(tb.__dict__))
+                elif hasattr(tb, "model_dump"):
+                    sanitised.append(tb.model_dump())
+            thinking_blocks = sanitised or None
 
         return LLMResponse(
             content=content,

@@ -82,6 +82,9 @@ class AgentLoop:
         session_manager: SessionManager | None = None,
         mcp_servers: dict | None = None,
         channels_config: ChannelsConfig | None = None,
+        subagent_provider: "LLMProvider | None" = None,
+        subagent_fallback_models: "list[str] | None" = None,
+        subagent_heartbeat_interval_seconds: int = 30,
     ):
         from nanobot.config.schema import ExecToolConfig
         self.bus = bus
@@ -104,7 +107,7 @@ class AgentLoop:
         self.sessions = session_manager or SessionManager(workspace)
         self.tools = ToolRegistry()
         self.subagents = SubagentManager(
-            provider=provider,
+            provider=subagent_provider or provider,
             workspace=workspace,
             bus=bus,
             model=self.model,
@@ -115,6 +118,8 @@ class AgentLoop:
             web_proxy=web_proxy,
             exec_config=self.exec_config,
             restrict_to_workspace=restrict_to_workspace,
+            fallback_models=subagent_fallback_models,
+            heartbeat_interval_seconds=subagent_heartbeat_interval_seconds,
         )
 
         # Runtime provider logging
@@ -197,10 +202,15 @@ class AgentLoop:
 
     @staticmethod
     def _strip_think(text: str | None) -> str | None:
-        """Remove <think>...</think> blocks that some models embed in content."""
+        """Remove thinking artifacts that models/SDKs may embed in content."""
         if not text:
             return None
-        return re.sub(r"<think>[\s\S]*?</think>", "", text).strip() or None
+        # XML-style <think>…</think>
+        text = re.sub(r"<think>[\s\S]*?</think>", "", text)
+        # SDK repr leaks: ThinkingBlock(thinking='…', signature='…')
+        # Strip any line that starts with these class reprs.
+        text = re.sub(r"(?:ThinkingBlock|SignatureBlock)\(.*", "", text)
+        return text.strip() or None
 
     @staticmethod
     def _tool_hint(tool_calls: list) -> str:
@@ -274,6 +284,7 @@ class AgentLoop:
         iteration = 0
         final_content = None
         tools_used: list[str] = []
+        prev_tool_call_sig: str | None = None  # duplicate detection
 
         while iteration < self.max_iterations:
             iteration += 1
@@ -313,9 +324,26 @@ class AgentLoop:
                         logger.debug("Codex progress heartbeat task ended with error", exc_info=True)
 
             if response.has_tool_calls:
+                # Duplicate detection: if the model returns the exact same set of
+                # tool calls as the previous iteration, it's stuck in a loop.
+                cur_sig = json.dumps(
+                    [(tc.name, tc.arguments) for tc in response.tool_calls],
+                    sort_keys=True, ensure_ascii=False,
+                )
+                if cur_sig == prev_tool_call_sig:
+                    logger.warning(
+                        "Duplicate tool calls detected (iteration {}), breaking loop",
+                        iteration,
+                    )
+                    final_content = self._strip_think(response.content)
+                    break
+                prev_tool_call_sig = cur_sig
+
                 if on_progress:
                     thought = self._strip_think(response.content)
-                    if thought:
+                    # Don't forward raw JSON payloads as thoughts — these are
+                    # parsing artefacts, not user-facing content.
+                    if thought and not (thought.lstrip().startswith("{") and thought.rstrip().endswith("}")):
                         await on_progress(thought)
                     await on_progress(self._tool_hint(response.tool_calls), tool_hint=True)
 
@@ -410,7 +438,9 @@ class AgentLoop:
                 response = await self._process_message(msg)
                 if response is not None:
                     await self.bus.publish_outbound(response)
-                elif msg.channel == "cli":
+                else:
+                    # Send an empty non-progress message so channels can clean
+                    # up any progress indicators (typing, status bubbles, etc.)
                     await self.bus.publish_outbound(OutboundMessage(
                         channel=msg.channel, chat_id=msg.chat_id,
                         content="", metadata=msg.metadata or {},
