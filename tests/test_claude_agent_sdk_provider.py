@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import types
+import importlib
 
 import pytest
 
@@ -23,6 +24,56 @@ def test_claude_agent_parse_response_payload_with_tool_calls():
     assert resp.has_tool_calls
     assert resp.tool_calls[0].name == "read_file"
     assert resp.tool_calls[0].arguments["path"] == "/tmp/x.txt"
+
+
+def test_claude_agent_parse_response_strips_markdown_fences():
+    raw = (
+        '```json\n'
+        '{"content":"hello","tool_calls":[],"finish_reason":"stop","reasoning_content":null}\n'
+        '```'
+    )
+    resp = ClaudeAgentSDKProvider._parse_response_payload(raw)
+    assert resp.content == "hello"
+    assert not resp.has_tool_calls
+
+
+def test_claude_agent_parse_response_extracts_json_from_prose():
+    raw = (
+        'Here is my response:\n'
+        '{"content":null,"tool_calls":[{"id":"t1","name":"exec",'
+        '"arguments":"{\\"command\\":\\"ls\\"}"}],'
+        '"finish_reason":"tool_calls","reasoning_content":null}\n'
+        'Hope that helps!'
+    )
+    resp = ClaudeAgentSDKProvider._parse_response_payload(raw)
+    assert resp.has_tool_calls
+    assert resp.tool_calls[0].name == "exec"
+    assert resp.tool_calls[0].arguments["command"] == "ls"
+
+
+def test_claude_agent_parse_response_tool_calls_with_dict_arguments():
+    raw = (
+        '{"content":null,"tool_calls":[{"id":"c1","name":"exec",'
+        '"arguments":{"command":"echo hi"}}],'
+        '"finish_reason":"tool_calls","reasoning_content":null}'
+    )
+    resp = ClaudeAgentSDKProvider._parse_response_payload(raw)
+    assert resp.has_tool_calls
+    assert resp.tool_calls[0].arguments["command"] == "echo hi"
+
+
+def test_claude_agent_load_sdk_uses_claude_agent_sdk_module(monkeypatch):
+    called = {}
+
+    def _fake_import(name: str):
+        called["name"] = name
+        return types.SimpleNamespace()
+
+    monkeypatch.setattr(importlib, "import_module", _fake_import)
+    sdk = ClaudeAgentSDKProvider._load_sdk()
+
+    assert isinstance(sdk, types.SimpleNamespace)
+    assert called["name"] == "claude_agent_sdk"
 
 
 @pytest.mark.asyncio

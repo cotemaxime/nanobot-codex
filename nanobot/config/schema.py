@@ -218,7 +218,7 @@ class ClaudeWorkerConfig(Base):
     timeout_seconds: int = 600
     heartbeat_interval_seconds: int = 30
     diagnostic_logging: bool = False
-    permission_mode: str = "acceptEdits"
+    permission_mode: str = "bypassPermissions"
     max_turns: int | None = None
     max_internal_native_steps: int | None = None
     strict_auth: bool = False

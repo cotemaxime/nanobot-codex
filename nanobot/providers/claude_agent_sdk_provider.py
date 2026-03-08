@@ -28,7 +28,7 @@ class ClaudeAgentSDKProvider(LLMProvider):
         timeout_seconds: int = 180,
         max_turns: int = 12,
         max_internal_native_steps: int = 6,
-        permission_mode: str = "acceptEdits",
+        permission_mode: str = "bypassPermissions",
         native_tools: list[str] | None = None,
         strict_auth: bool = False,
         diagnostic_logging: bool = False,
@@ -61,11 +61,11 @@ class ClaudeAgentSDKProvider(LLMProvider):
     @staticmethod
     def _load_sdk() -> Any:
         try:
-            return importlib.import_module("anthropic_agent_sdk")
+            return importlib.import_module("claude_agent_sdk")
         except Exception as e:
             raise RuntimeError(
                 "Anthropic Agent SDK is not available. Install with "
-                "`pip install anthropic-agent-sdk` and retry."
+                "`pip install claude-agent-sdk` and retry."
             ) from e
 
     @staticmethod
@@ -204,7 +204,7 @@ class ClaudeAgentSDKProvider(LLMProvider):
         query = getattr(self._sdk, "query", None)
         options_cls = getattr(self._sdk, "ClaudeAgentOptions", None)
         if not callable(query) or options_cls is None:
-            raise RuntimeError("anthropic_agent_sdk.query / ClaudeAgentOptions not found")
+            raise RuntimeError("claude_agent_sdk.query / ClaudeAgentOptions not found")
 
         prompt = self._build_prompt(messages, tools)
         options = options_cls(
@@ -215,12 +215,23 @@ class ClaudeAgentSDKProvider(LLMProvider):
         )
 
         async def _run_query() -> str:
-            final_text = ""
+            chunks: list[str] = []
             async for item in query(prompt=prompt, options=options):
                 text = self._extract_stream_text(item)
                 if text:
-                    final_text = text
-            return final_text
+                    chunks.append(text)
+            if not chunks:
+                return ""
+            # If the last chunk is valid JSON on its own, prefer it (complete response).
+            # Otherwise concatenate all chunks (streamed fragments).
+            last = chunks[-1].strip()
+            if last.startswith("{") and last.endswith("}"):
+                try:
+                    json.loads(last)
+                    return last
+                except Exception:
+                    pass
+            return "".join(chunks)
 
         raw = await asyncio.wait_for(_run_query(), timeout=self.timeout_seconds)
         return self._parse_response_payload(raw)
@@ -232,7 +243,15 @@ class ClaudeAgentSDKProvider(LLMProvider):
             if isinstance(val, str) and val.strip():
                 return val
             if isinstance(val, list):
-                joined = " ".join(str(x) for x in val if x)
+                parts = []
+                for x in val:
+                    if isinstance(x, str):
+                        parts.append(x)
+                    elif hasattr(x, "text") and isinstance(x.text, str):
+                        parts.append(x.text)
+                    elif x:
+                        parts.append(str(x))
+                joined = " ".join(parts)
                 if joined.strip():
                     return joined
         if isinstance(item, str) and item.strip():
@@ -329,13 +348,55 @@ class ClaudeAgentSDKProvider(LLMProvider):
         }
 
     @staticmethod
-    def _parse_response_payload(raw: str) -> LLMResponse:
+    def _extract_json_from_text(text: str) -> str | None:
+        """Try to extract a JSON object from text that may contain markdown fences or prose."""
+        import re
+
+        # Strip markdown fences: ```json ... ``` or ``` ... ```
+        fenced = re.search(r"```(?:json)?\s*\n?(.*?)\n?\s*```", text, re.DOTALL)
+        if fenced:
+            candidate = fenced.group(1).strip()
+            try:
+                json.loads(candidate)
+                return candidate
+            except Exception:
+                pass
+
+        # Find the outermost { ... } block (greedy)
+        brace = re.search(r"\{.*\}", text, re.DOTALL)
+        if brace:
+            candidate = brace.group(0).strip()
+            try:
+                json.loads(candidate)
+                return candidate
+            except Exception:
+                pass
+
+        return None
+
+    @classmethod
+    def _parse_response_payload(cls, raw: str) -> LLMResponse:
         text = (raw or "").strip()
         if not text:
             return LLMResponse(content="", finish_reason="stop")
+
+        # Try direct parse first, then extract from fences/prose.
+        payload = None
         try:
             payload = json.loads(text)
         except Exception:
+            extracted = cls._extract_json_from_text(text)
+            if extracted:
+                try:
+                    payload = json.loads(extracted)
+                except Exception:
+                    pass
+
+        if payload is None or not isinstance(payload, dict):
+            logger.warning(
+                f"[claude-agent-provider] Failed to parse JSON response "
+                f"({len(text)} chars), treating as plain text"
+            )
             return LLMResponse(content=text, finish_reason="stop")
 
         content = payload.get("content")
