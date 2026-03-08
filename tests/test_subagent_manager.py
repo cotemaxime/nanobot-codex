@@ -11,7 +11,7 @@ class FakeProvider:
     def get_default_model(self) -> str:
         return "openai-codex/gpt-5.1-codex"
 
-    async def chat(self, messages, tools=None, model=None, max_tokens=4096, temperature=0.7):
+    async def chat(self, messages, tools=None, model=None, max_tokens=4096, temperature=0.7, reasoning_effort=None):
         return LLMResponse(content="done")
 
 
@@ -19,7 +19,7 @@ class GenericProvider:
     def get_default_model(self) -> str:
         return "anthropic/claude-3-5-haiku"
 
-    async def chat(self, messages, tools=None, model=None, max_tokens=4096, temperature=0.7):
+    async def chat(self, messages, tools=None, model=None, max_tokens=4096, temperature=0.7, reasoning_effort=None):
         return LLMResponse(content="done")
 
 
@@ -31,7 +31,7 @@ class SlowProvider:
     def get_default_model(self) -> str:
         return "anthropic/claude-3-5-haiku"
 
-    async def chat(self, messages, tools=None, model=None, max_tokens=4096, temperature=0.7):
+    async def chat(self, messages, tools=None, model=None, max_tokens=4096, temperature=0.7, reasoning_effort=None):
         import asyncio
         await asyncio.sleep(2.0)
         return LLMResponse(content="done")
@@ -44,7 +44,7 @@ class FallbackProvider:
     def get_default_model(self) -> str:
         return "gpt-5.3-codex"
 
-    async def chat(self, messages, tools=None, model=None, max_tokens=4096, temperature=0.7):
+    async def chat(self, messages, tools=None, model=None, max_tokens=4096, temperature=0.7, reasoning_effort=None):
         self.calls.append(model or "")
         if model == "gpt-5.3-codex":
             return LLMResponse(

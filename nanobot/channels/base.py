@@ -59,17 +59,14 @@ class BaseChannel(ABC):
         pass
 
     def is_allowed(self, sender_id: str) -> bool:
-        """Check if *sender_id* is permitted."""
+        """Check if *sender_id* is permitted.  Empty list → deny all; ``"*"`` → allow all."""
         allow_list = getattr(self.config, "allow_from", [])
-        # Backward-compatible default: empty allow list means open access.
         if not allow_list:
-            return True
+            logger.warning("{}: allow_from is empty — all access denied", self.name)
+            return False
         if "*" in allow_list:
             return True
-        sender_str = str(sender_id)
-        return sender_str in allow_list or any(
-            p in allow_list for p in sender_str.split("|") if p
-        )
+        return str(sender_id) in allow_list
 
     async def _handle_message(
         self,
@@ -108,6 +105,7 @@ class BaseChannel(ABC):
             content=content,
             media=media or [],
             metadata=metadata or {},
+            session_key_override=session_key,
         )
 
         await self.bus.publish_inbound(msg)

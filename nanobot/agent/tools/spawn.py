@@ -1,6 +1,6 @@
 """Spawn tool for creating background subagents."""
 
-from typing import Any, Callable, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from nanobot.agent.tools.base import Tool
 
@@ -9,51 +9,32 @@ if TYPE_CHECKING:
 
 
 class SpawnTool(Tool):
-    """
-    Tool to spawn a subagent for background task execution.
-    
-    The subagent runs asynchronously and announces its result back
-    to the main agent when complete.
-    """
-    
-    def __init__(
-        self,
-        manager: "SubagentManager",
-        context_getter: Callable[[], tuple[str, str] | None] | None = None,
-    ):
+    """Tool to spawn a subagent for background task execution."""
+
+    def __init__(self, manager: "SubagentManager"):
         self._manager = manager
-        self._context_getter = context_getter
         self._origin_channel = "cli"
         self._origin_chat_id = "direct"
-        self._origin_metadata: dict[str, Any] = {}
-        self._origin_session_key: str | None = None
-    
-    def set_context(
-        self,
-        channel: str,
-        chat_id: str,
-        metadata: dict[str, Any] | None = None,
-        session_key: str | None = None,
-    ) -> None:
+        self._session_key = "cli:direct"
+
+    def set_context(self, channel: str, chat_id: str) -> None:
         """Set the origin context for subagent announcements."""
         self._origin_channel = channel
         self._origin_chat_id = chat_id
-        self._origin_metadata = dict(metadata or {})
-        self._origin_session_key = session_key
-    
+        self._session_key = f"{channel}:{chat_id}"
+
     @property
     def name(self) -> str:
         return "spawn"
-    
+
     @property
     def description(self) -> str:
         return (
             "Spawn a subagent to handle a task in the background. "
-            "Use this for any external or tool-heavy task (web research, shell commands, file edits, multi-step work). "
-            "In planner mode, this is the primary execution path. "
-            "The subagent has broader execution capabilities and reports back when done."
+            "Use this for complex or time-consuming tasks that can run independently. "
+            "The subagent will complete the task and report back when done."
         )
-    
+
     @property
     def parameters(self) -> dict[str, Any]:
         return {
@@ -70,31 +51,13 @@ class SpawnTool(Tool):
             },
             "required": ["task"],
         }
-    
+
     async def execute(self, task: str, label: str | None = None, **kwargs: Any) -> str:
         """Spawn a subagent to execute the given task."""
-        origin_channel = self._origin_channel
-        origin_chat_id = self._origin_chat_id
-        if self._context_getter:
-            context = self._context_getter()
-            if context:
-                origin_channel, origin_chat_id = context
-        try:
-            return await self._manager.spawn(
-                task=task,
-                label=label,
-                origin_channel=origin_channel,
-                origin_chat_id=origin_chat_id,
-                origin_metadata=self._origin_metadata,
-                origin_session_key=self._origin_session_key,
-            )
-        except TypeError as exc:
-            # Compatibility path for older spawn manager signatures used in tests.
-            if "unexpected keyword argument" not in str(exc):
-                raise
-            return await self._manager.spawn(
-                task=task,
-                label=label,
-                origin_channel=origin_channel,
-                origin_chat_id=origin_chat_id,
-            )
+        return await self._manager.spawn(
+            task=task,
+            label=label,
+            origin_channel=self._origin_channel,
+            origin_chat_id=self._origin_chat_id,
+            session_key=self._session_key,
+        )

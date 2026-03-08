@@ -14,7 +14,7 @@ class _DummyTransport:
     def validate_session(self):
         return True, "ok"
 
-    async def chat(self, messages, tools, model, max_tokens, temperature):
+    async def chat(self, messages, tools, model, max_tokens, temperature, reasoning_effort=None):
         self.last_model = model
         return SimpleNamespace(
             content="ok",
